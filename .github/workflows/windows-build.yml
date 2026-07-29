@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:   # elle tetikleme (Actions sekmesinden "Run workflow")
 
+permissions:
+  contents: write        # release oluşturma/güncelleme için
+
 jobs:
   build:
     runs-on: windows-latest
@@ -18,6 +21,8 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       # openh264-sys2 nasm ister; CI'da nasm kurmak yerine saf-C derleme (garantili).
       - name: Build client (media/GUI)
@@ -28,11 +33,29 @@ jobs:
       - name: Build server
         run: cargo build -p away-server --release
 
-      - name: Upload binaries
+      - name: away.exe hazırla
+        shell: pwsh
+        run: Copy-Item target/release/away-client.exe away.exe
+
+      - name: Upload binaries (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: away-windows-x64
           path: |
-            target/release/away-client.exe
+            away.exe
             target/release/away-server.exe
           if-no-files-found: error
+
+      # Sabit "en dıştaki" indirme linki:
+      #   https://github.com/zynordev/aWay/releases/latest/download/away.exe
+      - name: Release (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: aWay — son sürüm (Windows)
+          body: |
+            En güncel Windows derlemesi. away.exe = tek pencere GUI istemci.
+            Çalıştır, giriş yap (varsayılan sunucu wss://away.bilgicoderteam.tr/ws).
+          files: |
+            away.exe
+            target/release/away-server.exe
