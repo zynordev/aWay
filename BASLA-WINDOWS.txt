@@ -1,0 +1,28 @@
+aWay — Windows'ta derle & çalıştır (özet)
+==========================================
+
+Ayrıntılı rehber: client/BUILD-WINDOWS.md
+Sinyal sunucusu CANLI: wss://away.bilgicoderteam.tr/ws  (istemcinin varsayılanı budur;
+--server yazmana gerek yok). Yerel sunucu gerekmez.
+
+1) Gereksinimler (bir kez):
+   - Rust (MSVC):            https://rustup.rs   (varsayılan stable-x86_64-pc-windows-msvc)
+   - Visual Studio Build Tools -> "Desktop development with C++"
+   - H264 için: nasm kur (choco install nasm)  YA DA  derlemeden önce:  $env:OPENH264_NO_ASM=1
+
+2) Derle (PowerShell, bu klasörün içinde):
+   cargo build -p away-client --features media --release
+
+3) Çalıştır — tek pencere GUI (flag yok):
+   .\target\release\away-client.exe
+   Açılan pencerede kullanıcı adı + şifre ile giriş yap (hesabı sistem sahibi verir).
+   Ana ekranda karşının adını yazıp "Bağlan"; sana bağlanınca "Kabul/Ret" çıkar.
+
+   Hızlı test için hazır iki hesap (canlı sunucuda): test / test1234  ve  test2 / test1234
+   İki pencere aç:
+     .\target\release\away-client.exe --user test  --pass test1234
+     .\target\release\away-client.exe --user test2 --pass test1234 --connect test
+   -> test penceresinde "Kabul et" -> test2 test'in ekranını görür.
+
+Not: --features media OLMADAN derlersen GUI değil, geliştirici data-channel testi çalışır.
+Sorun/çıktı olursa Claude'a yapıştır; app/net/encode/decode.rs yerel, hızlı düzeltilir.

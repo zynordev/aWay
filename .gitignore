@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+accounts.json
+accounts.json.tmp
+*.log
+.env
+
+# Alakasız / büyük
+samsun-export.zip

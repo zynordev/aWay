@@ -1,0 +1,38 @@
+[package]
+name = "away-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "away_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "away-server"
+path = "src/main.rs"
+
+[dependencies]
+away-shared = { path = "../shared" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# HTTP/WebSocket
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["trace"] }
+futures-util = "0.3"
+
+# Kimlik doğrulama / kripto
+argon2 = "0.5"
+rand = "0.8"
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"

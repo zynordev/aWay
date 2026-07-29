@@ -1,0 +1,33 @@
+# systemd birimi — aWay sinyal sunucusu
+#
+# Kurulum:
+#   cp target/release/away-server /usr/local/bin/away-server
+#   mkdir -p /var/lib/away
+#   cp deploy/away-server.service /etc/systemd/system/
+#   cp deploy/env.example /etc/away/env   # ve düzenle
+#   systemctl daemon-reload && systemctl enable --now away-server
+
+[Unit]
+Description=aWay signaling server
+After=network.target
+
+[Service]
+Type=simple
+# Bellek-darı VDS'te güvenlik: sunucu belleğini sınırla (Mastodon/r-place'i korur)
+MemoryMax=128M
+EnvironmentFile=/etc/away/env
+ExecStart=/usr/local/bin/away-server
+Restart=on-failure
+RestartSec=2
+# Sıkılaştırma
+DynamicUser=no
+User=away
+Group=away
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/away
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

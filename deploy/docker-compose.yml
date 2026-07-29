@@ -1,0 +1,19 @@
+# coturn — STUN/TURN sunucusu (NAT delme + relay yedeği).
+#
+# `network_mode: host` gerekli: TURN, relay için geniş bir UDP port aralığı kullanır
+# ve dış IP'yi görmelidir. VDS'in public IP'si zaten var (38.210.77.34).
+#
+# Başlatma:  docker compose -f deploy/docker-compose.yml up -d
+# Gizli anahtar turnserver.conf içindeki static-auth-secret ile AWAY_TURN_SECRET aynı olmalı.
+
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: away_coturn
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # TLS (turns://) istersen certbot sertifikalarını da bağla:
+      # - /etc/letsencrypt/live/away.bilgicoderteam.tr:/certs:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
