@@ -1,0 +1,38 @@
+name: Windows build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # elle tetikleme (Actions sekmesinden "Run workflow")
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (MSVC)
+        run: |
+          rustup default stable
+          rustup show
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      # openh264-sys2 nasm ister; CI'da nasm kurmak yerine saf-C derleme (garantili).
+      - name: Build client (media/GUI)
+        env:
+          OPENH264_NO_ASM: "1"
+        run: cargo build -p away-client --features media --release
+
+      - name: Build server
+        run: cargo build -p away-server --release
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: away-windows-x64
+          path: |
+            target/release/away-client.exe
+            target/release/away-server.exe
+          if-no-files-found: error
