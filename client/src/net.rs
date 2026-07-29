@@ -219,7 +219,7 @@ async fn handle_command(
         }
         UiCommand::Hangup => {
             if let Some(s) = session.take() {
-                let _ = out.send(ClientMessage::Hangup { session: s.id.clone(), to: s.peer.clone() });
+                let _ = out.send(ClientMessage::Hangup { session: s.id.clone() });
                 let _ = s.pc.close().await;
             }
             frames.take(); // son kareyi temizle

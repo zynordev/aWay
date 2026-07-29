@@ -9,6 +9,7 @@
 use crate::frame::RgbaFrame;
 use anyhow::{anyhow, Result};
 use openh264::decoder::Decoder;
+use openh264::formats::YUVSource; // DecodedYUV::dimensions() bu trait üzerinden gelir
 
 pub struct H264Decoder {
     inner: Decoder,
