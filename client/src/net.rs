@@ -106,6 +106,10 @@ struct Session {
     pc: Arc<RTCPeerConnection>,
     remote_set: bool,
     pending: Vec<RTCIceCandidateInit>,
+    /// HOST: yakalama/encode thread'i bağlantı kurulunca başlatılır; kanalın gönderen
+    /// ucu o ana kadar burada bekler. Erken başlatılırsa ilk IDR henüz bağlanmamış
+    /// track'e yazılıp kaybolur ve izleyici uzun süre siyah ekran görür.
+    capture_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 }
 
 /// Kabul bekleyen gelen istek.
@@ -261,17 +265,30 @@ pub async fn run_engine(
                     }
                 }
                 st = pc_rx.recv() => {
-                    // Sinyal ayakta olsa bile P2P yolu ölebilir (NAT/ağ değişimi, TURN yok).
-                    if let Some(RTCPeerConnectionState::Failed) = st {
-                        if let Some(s) = session.take() {
-                            let _ = out.send(ClientMessage::Hangup { session: s.id.clone() });
-                            let _ = s.pc.close().await;
+                    match st {
+                        // P2P hattı hazır. HOST yakalamayı ANCAK ŞİMDİ başlatır: ilk kare
+                        // her zaman IDR'dır ve artık canlı track'e düşer → görüntü hemen açılır.
+                        Some(RTCPeerConnectionState::Connected) => {
+                            if let Some(s) = session.as_mut() {
+                                if let Some(tx) = s.capture_tx.take() {
+                                    crate::capture::spawn_capture_encoder(tx, fps);
+                                }
+                            }
+                            set_status(&shared, &ctx, "eş bağlantısı kuruldu");
                         }
-                        frames.take();
-                        set_screen(&shared, &ctx, Screen::Message {
-                            text: "eş bağlantısı koptu (doğrudan P2P yolu kurulamadı)".into(),
-                            error: true,
-                        }, "koptu");
+                        // Sinyal ayakta olsa bile P2P yolu ölebilir (NAT/ağ değişimi, TURN yok).
+                        Some(RTCPeerConnectionState::Failed) => {
+                            if let Some(s) = session.take() {
+                                let _ = out.send(ClientMessage::Hangup { session: s.id.clone() });
+                                let _ = s.pc.close().await;
+                            }
+                            frames.take();
+                            set_screen(&shared, &ctx, Screen::Message {
+                                text: "eş bağlantısı koptu (doğrudan P2P yolu kurulamadı)".into(),
+                                error: true,
+                            }, "koptu");
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -439,7 +456,7 @@ async fn start_host(
     let track = video::add_screen_track(&pc).await?;
     let (enc_tx, enc_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
     video::spawn_sample_writer(track, enc_rx, fps);
-    crate::capture::spawn_capture_encoder(enc_tx, fps);
+    // Yakalama BAŞLATILMAZ — bağlantı `Connected` olunca run_engine başlatır.
 
     out.send(ClientMessage::ConnectResponse {
         session: inc.session.clone(),
@@ -466,6 +483,7 @@ async fn start_host(
         pc,
         remote_set: false,
         pending: Vec::new(),
+        capture_tx: Some(enc_tx),
     })
 }
 
@@ -509,6 +527,7 @@ async fn start_viewer(
         pc,
         remote_set: false,
         pending: Vec::new(),
+        capture_tx: None, // viewer ekran yakalamaz
     })
 }
 

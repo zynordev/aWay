@@ -19,6 +19,14 @@ pub fn spawn_capture_encoder(tx: mpsc::Sender<Vec<u8>>, fps: u32) {
     });
 }
 
+/// Anahtar kare (IDR) aralığı.
+///
+/// openh264 varsayılanında PERİYODİK IDR YOKTUR — yalnızca ilk kare ve sahne değişimleri.
+/// İzleyicinin decoder'ı ilk IDR'ı kaçırırsa (bağlantı henüz kurulmamışken üretildiyse ya da
+/// paket kaybolduysa) görüntü, ekranda büyük bir değişiklik olana kadar HİÇ açılmaz.
+/// İlk bağlantıdaki ~20 sn'lik bekleyişin sebebi buydu.
+const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
 fn capture_encode_loop(tx: &mpsc::Sender<Vec<u8>>, fps: u32) -> Result<()> {
     use scrap::{Capturer, Display};
 
@@ -27,8 +35,10 @@ fn capture_encode_loop(tx: &mpsc::Sender<Vec<u8>>, fps: u32) -> Result<()> {
     let (w, h) = (capturer.width(), capturer.height());
     tracing::info!("ekran yakalanıyor: {w}x{h} @ {fps}fps");
 
-    let mut encoder = H264Encoder::new()?;
+    let mut encoder = H264Encoder::new(fps)?;
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
+    // İlk kare zaten IDR olarak üretilir; sayaç oradan işlemeye başlar.
+    let mut last_keyframe = Instant::now();
 
     loop {
         let t0 = Instant::now();
@@ -51,6 +61,11 @@ fn capture_encode_loop(tx: &mpsc::Sender<Vec<u8>>, fps: u32) -> Result<()> {
             }
             Err(e) => return Err(anyhow!("kare alınamadı: {e}")),
         };
+
+        if last_keyframe.elapsed() >= KEYFRAME_INTERVAL {
+            encoder.force_keyframe();
+            last_keyframe = Instant::now();
+        }
 
         let encoded = encoder.encode(&bgra)?;
         if !encoded.is_empty() && tx.blocking_send(encoded).is_err() {
