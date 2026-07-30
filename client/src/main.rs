@@ -47,8 +47,10 @@ struct Args {
     /// (çekirdek) verilirse arayan, verilmezse bekleyen olur.
     #[arg(long)]
     connect: Option<String>,
-    /// (media) Paylaşım kare hızı.
-    #[arg(long, default_value_t = 30)]
+    /// (media) Paylaşım kare hızı. Yakalama+encode tamamen yazılımsal olduğundan CPU
+    /// maliyeti doğrudan bununla orantılı; masaüstü için 15 akıcı ve belirgin şekilde
+    /// ucuz. Güçlü makinede `--fps 30` denenebilir.
+    #[arg(long, default_value_t = 15)]
     fps: u32,
 }
 
