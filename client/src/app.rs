@@ -106,6 +106,7 @@ impl eframe::App for AwayApp {
         egui::CentralPanel::default().show(ctx, |ui| match screen {
             Screen::Login => self.ui_login(ui),
             Screen::Register => self.ui_register(ui),
+            Screen::Reconnecting => self.ui_reconnecting(ui),
             Screen::Home => self.ui_home(ui, my_username.as_deref()),
             Screen::Connecting { peer } => self.ui_connecting(ui, &peer),
             Screen::Incoming { from } => self.ui_incoming(ui, &from),
@@ -233,6 +234,16 @@ impl AwayApp {
                     self.send(UiCommand::Connect { to: self.f_peer.trim().to_string() });
                 }
             });
+        });
+    }
+
+    fn ui_reconnecting(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(60.0);
+            ui.add(egui::Spinner::new().size(32.0));
+            ui.add_space(12.0);
+            ui.heading("Sunucu bağlantısı koptu");
+            ui.label("Otomatik yeniden bağlanılıyor…");
         });
     }
 

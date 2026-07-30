@@ -8,14 +8,25 @@
 use crate::frame::FrameBuffer;
 use crate::video;
 use crate::webrtc_conn::{new_peer_connection, to_rtc_ice_servers};
+use anyhow::anyhow;
 use away_shared::protocol::{ClientMessage, IceServer, ServerMessage, SignalPayload};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::signaling::Signaling;
+
+/// Sinyal WebSocket'ini canlı tutan uygulama-seviyesi ping aralığı.
+/// Boşta kalan WS'i Cloudflare ~100 sn, nginx varsayılanı 60 sn sonra kapatır;
+/// bu aralık ikisinin de rahatça altında. (Ping olmadan oturum ~2 dk'da kopuyordu.)
+const KEEPALIVE_SECS: u64 = 25;
+
+/// Sinyal koparsa kullanıcıyı rahatsız etmeden kaç kez yeniden giriş denensin.
+const RECONNECT_TRIES: u32 = 5;
 
 /// UI'ın gösterdiği ekran (durum makinesi).
 #[derive(Clone, Debug)]
@@ -24,6 +35,8 @@ pub enum Screen {
     Login,
     /// Hesap oluşturma formu (sunucu + kullanıcı + şifre + şifre tekrar).
     Register,
+    /// Sinyal bağlantısı koptu; otomatik yeniden giriş deneniyor.
+    Reconnecting,
     /// Ana ekran: kendi kullanıcı adın + bağlan kutusu; gelen bağlantıyı dinler.
     Home,
     /// Giden bağlantı kuruluyor.
@@ -70,6 +83,19 @@ enum Role {
     Viewer,
 }
 
+/// Giriş bilgileri — sinyal koparsa otomatik yeniden giriş için saklanır.
+#[derive(Clone)]
+struct Creds {
+    server: String,
+    user: String,
+    pass: String,
+}
+
+/// P2P bağlantı durumu bildirimi (webrtc callback'i -> motor döngüsü).
+/// Doğrudan UI'a yazmak yerine motora gidiyor; çünkü kopma hâlinde oturumun
+/// motor tarafındaki kaydının da temizlenmesi gerekiyor.
+type PcStateTx = UnboundedSender<RTCPeerConnectionState>;
+
 /// Aktif oturum durumu (tek seferde bir oturum).
 struct Session {
     id: String,
@@ -104,7 +130,91 @@ fn set_status(shared: &Shared, ctx: &egui::Context, status: impl Into<String>) {
     ctx.request_repaint();
 }
 
-/// Motorun giriş noktası. Login komutu gelene kadar bekler; giriş başarılıysa ana döngüye geçer.
+/// Sunucuya bağlan, (istenirse) hesabı aç ve giriş yap.
+async fn try_auth(c: &Creds, new_account: bool) -> anyhow::Result<Signaling> {
+    let mut s = Signaling::connect(&c.server)
+        .await
+        .map_err(|e| anyhow!("sunucuya bağlanılamadı: {e}"))?;
+    if new_account {
+        s.register(&c.user, &c.pass).await?;
+    }
+    s.login(&c.user, &c.pass).await?;
+    Ok(s)
+}
+
+/// Oturum açık hâle gelene kadar bekle. Elde kimlik varsa (kopma sonrası) önce
+/// sessizce yeniden dener; olmazsa giriş formuna düşer ve kullanıcıyı bekler.
+/// `None` yalnızca UI kapandığında döner.
+async fn authenticate(
+    shared: &Shared,
+    ctx: &egui::Context,
+    cmd_rx: &mut UnboundedReceiver<UiCommand>,
+    creds: &mut Option<Creds>,
+) -> Option<Signaling> {
+    if let Some(c) = creds.clone() {
+        for attempt in 1..=RECONNECT_TRIES {
+            set_screen(
+                shared,
+                ctx,
+                Screen::Reconnecting,
+                format!("bağlantı koptu — yeniden bağlanılıyor ({attempt}/{RECONNECT_TRIES})"),
+            );
+            match try_auth(&c, false).await {
+                Ok(sig) => {
+                    {
+                        let mut st = shared.lock().unwrap();
+                        st.my_username = Some(c.user.clone());
+                        st.screen = Screen::Home;
+                        st.status = "yeniden bağlandı".into();
+                    }
+                    ctx.request_repaint();
+                    return Some(sig);
+                }
+                Err(e) => tracing::warn!("yeniden bağlanma denemesi {attempt}: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+        }
+        shared.lock().unwrap().my_username = None;
+        set_screen(shared, ctx, Screen::Login, "yeniden bağlanılamadı — tekrar giriş yap");
+    }
+
+    loop {
+        // Giriş öncesi yalnızca Login/Register anlamlı; ikisi de aynı akışı izler
+        // (kayıt varsa önce hesabı aç), sonuçta oturum açılırsa fonksiyon döner.
+        let (c, new_account) = match cmd_rx.recv().await {
+            Some(UiCommand::Login { server, user, pass }) => (Creds { server, user, pass }, false),
+            Some(UiCommand::Register { server, user, pass }) => (Creds { server, user, pass }, true),
+            Some(_) => continue, // giriş öncesi diğer komutlar yok sayılır
+            None => return None,
+        };
+        // Hata durumunda kullanıcıyı geldiği forma geri gönder.
+        let form = if new_account { Screen::Register } else { Screen::Login };
+        set_status(
+            shared,
+            ctx,
+            if new_account { "hesap oluşturuluyor…" } else { "sunucuya bağlanılıyor…" },
+        );
+
+        match try_auth(&c, new_account).await {
+            Ok(sig) => {
+                {
+                    let mut st = shared.lock().unwrap();
+                    st.my_username = Some(c.user.clone());
+                    st.screen = Screen::Home;
+                    st.status = "hazır".into();
+                }
+                ctx.request_repaint();
+                *creds = Some(c);
+                return Some(sig);
+            }
+            Err(e) => set_screen(shared, ctx, form, e.to_string()),
+        }
+    }
+}
+
+/// Motorun giriş noktası. Giriş -> ana döngü; sinyal koparsa yeniden giriş denenir.
+/// Bu fonksiyon YALNIZCA pencere kapandığında döner — aksi hâlde motor ölür ve
+/// kullanıcı bir daha hiçbir şeye bağlanamaz.
 pub async fn run_engine(
     shared: Shared,
     mut cmd_rx: UnboundedReceiver<UiCommand>,
@@ -112,81 +222,68 @@ pub async fn run_engine(
     ctx: egui::Context,
     fps: u32,
 ) {
-    let mut sig = loop {
-        // Giriş öncesi yalnızca Login/Register anlamlı; ikisi de aynı akışı izler
-        // (kayıt varsa önce hesabı aç), sonuçta oturum açılırsa döngüden çıkılır.
-        let (server, user, pass, new_account) = match cmd_rx.recv().await {
-            Some(UiCommand::Login { server, user, pass }) => (server, user, pass, false),
-            Some(UiCommand::Register { server, user, pass }) => (server, user, pass, true),
-            Some(_) => continue, // giriş öncesi diğer komutlar yok sayılır
-            None => return,
-        };
-        // Hata durumunda kullanıcıyı geldiği forma geri gönder.
-        let form = if new_account { Screen::Register } else { Screen::Login };
-
-        set_status(&shared, &ctx, "sunucuya bağlanılıyor…");
-        let mut s = match Signaling::connect(&server).await {
-            Ok(s) => s,
-            Err(e) => {
-                set_screen(&shared, &ctx, form.clone(), format!("bağlanılamadı: {e}"));
-                continue;
-            }
-        };
-
-        if new_account {
-            set_status(&shared, &ctx, "hesap oluşturuluyor…");
-            if let Err(e) = s.register(&user, &pass).await {
-                set_screen(&shared, &ctx, form.clone(), format!("hesap oluşturulamadı: {e}"));
-                continue;
-            }
-            set_status(&shared, &ctx, "hesap açıldı, giriş yapılıyor…");
-        }
-
-        match s.login(&user, &pass).await {
-            Ok(_) => {
-                {
-                    let mut st = shared.lock().unwrap();
-                    st.my_username = Some(user.clone());
-                    st.screen = Screen::Home;
-                    st.status = "hazır".into();
-                }
-                ctx.request_repaint();
-                break s;
-            }
-            Err(e) => {
-                set_screen(&shared, &ctx, form.clone(), format!("giriş başarısız: {e}"));
-                continue;
-            }
-        }
-    };
-
-    let mut session: Option<Session> = None;
-    let mut incoming: Option<Incoming> = None;
-    let out = sig.outbound.clone();
+    let mut creds: Option<Creds> = None;
+    // P2P durum bildirimleri; motorun ömrü boyunca açık kalır.
+    let (pc_tx, mut pc_rx) = tokio::sync::mpsc::unbounded_channel::<RTCPeerConnectionState>();
 
     loop {
-        tokio::select! {
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    None => break,
-                    Some(c) => {
-                        handle_command(c, &shared, &ctx, &frames, &out, &mut session, &mut incoming, fps).await;
+        let Some(mut sig) = authenticate(&shared, &ctx, &mut cmd_rx, &mut creds).await else {
+            return; // UI kapandı
+        };
+
+        let mut session: Option<Session> = None;
+        let mut incoming: Option<Incoming> = None;
+        let out = sig.outbound.clone();
+        let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+        keepalive.tick().await; // ilk tick anında döner; onu harca
+
+        // `true` -> pencere kapandı, `false` -> sinyal koptu (yeniden bağlan).
+        let ui_closed = loop {
+            tokio::select! {
+                _ = keepalive.tick() => {
+                    // Boşta kalan WS'i araya giren proxy'ler kapatmasın.
+                    let _ = out.send(ClientMessage::Ping);
+                }
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        None => break true,
+                        Some(c) => {
+                            handle_command(c, &shared, &ctx, &frames, &out, &pc_tx, &mut session, &mut incoming, fps).await;
+                        }
                     }
                 }
-            }
-            msg = sig.inbound.recv() => {
-                match msg {
-                    None => {
+                msg = sig.inbound.recv() => {
+                    match msg {
+                        None => break false,
+                        Some(m) => {
+                            handle_server(m, &shared, &ctx, &frames, &out, &pc_tx, &mut session, &mut incoming).await;
+                        }
+                    }
+                }
+                st = pc_rx.recv() => {
+                    // Sinyal ayakta olsa bile P2P yolu ölebilir (NAT/ağ değişimi, TURN yok).
+                    if let Some(RTCPeerConnectionState::Failed) = st {
+                        if let Some(s) = session.take() {
+                            let _ = out.send(ClientMessage::Hangup { session: s.id.clone() });
+                            let _ = s.pc.close().await;
+                        }
+                        frames.take();
                         set_screen(&shared, &ctx, Screen::Message {
-                            text: "sunucu bağlantısı kapandı".into(), error: true,
-                        }, "kopuk");
-                        break;
-                    }
-                    Some(m) => {
-                        handle_server(m, &shared, &ctx, &frames, &out, &mut session, &mut incoming).await;
+                            text: "eş bağlantısı koptu (doğrudan P2P yolu kurulamadı)".into(),
+                            error: true,
+                        }, "koptu");
                     }
                 }
             }
+        };
+
+        // Kopma/çıkış temizliği: sinyalsiz oturum sürdürülemez.
+        if let Some(s) = session.take() {
+            let _ = s.pc.close().await;
+        }
+        frames.take();
+        if ui_closed {
+            return;
         }
     }
 }
@@ -198,6 +295,7 @@ async fn handle_command(
     ctx: &egui::Context,
     frames: &FrameBuffer,
     out: &UnboundedSender<ClientMessage>,
+    pc_tx: &PcStateTx,
     session: &mut Option<Session>,
     incoming: &mut Option<Incoming>,
     fps: u32,
@@ -218,7 +316,7 @@ async fn handle_command(
         }
         UiCommand::Accept => {
             let Some(inc) = incoming.take() else { return };
-            match start_host(shared, ctx, out, inc, fps).await {
+            match start_host(shared, ctx, out, pc_tx, inc, fps).await {
                 Ok(s) => *session = Some(s),
                 Err(e) => set_screen(shared, ctx, Screen::Message {
                     text: format!("paylaşım başlatılamadı: {e}"), error: true,
@@ -254,6 +352,7 @@ async fn handle_server(
     ctx: &egui::Context,
     frames: &FrameBuffer,
     out: &UnboundedSender<ClientMessage>,
+    pc_tx: &PcStateTx,
     session: &mut Option<Session>,
     incoming: &mut Option<Incoming>,
 ) {
@@ -275,7 +374,7 @@ async fn handle_server(
         }
         ServerMessage::ConnectAccepted { session: sid, peer, ice_servers } => {
             // Biz viewer'ız: pc kur, video track'i bekle. Offer'ı HOST üretecek.
-            match start_viewer(shared, ctx, frames, out, sid, peer.clone(), ice_servers).await {
+            match start_viewer(shared, ctx, frames, out, pc_tx, sid, peer.clone(), ice_servers).await {
                 Ok(s) => *session = Some(s),
                 Err(e) => set_screen(shared, ctx, Screen::Message {
                     text: format!("bağlantı kurulamadı: {e}"), error: true,
@@ -308,11 +407,22 @@ async fn handle_server(
     }
 }
 
+/// P2P durum değişimlerini motora ilet. `new_peer_connection` içindeki handler'ın
+/// (yalnızca log basar) üzerine yazar — webrtc-rs'te bu handler tek yuvalıdır.
+fn watch_pc_state(pc: &Arc<RTCPeerConnection>, pc_tx: PcStateTx) {
+    pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+        tracing::info!("bağlantı durumu: {s}");
+        let _ = pc_tx.send(s);
+        Box::pin(async {})
+    }));
+}
+
 /// HOST rolünü başlat: pc + ekran track'i + yakalama, kabul yanıtı, offer üretimi.
 async fn start_host(
     shared: &Shared,
     ctx: &egui::Context,
     out: &UnboundedSender<ClientMessage>,
+    pc_tx: &PcStateTx,
     inc: Incoming,
     fps: u32,
 ) -> anyhow::Result<Session> {
@@ -323,6 +433,7 @@ async fn start_host(
         out.clone(),
     )
     .await?;
+    watch_pc_state(&pc, pc_tx.clone());
 
     // Ekran track'i offer'dan ÖNCE eklenmeli ki SDP'de video yer alsın.
     let track = video::add_screen_track(&pc).await?;
@@ -359,16 +470,19 @@ async fn start_host(
 }
 
 /// VIEWER rolünü başlat: pc + gelen video track handler'ı. Offer HOST'tan gelecek (apply_signal).
+#[allow(clippy::too_many_arguments)]
 async fn start_viewer(
     shared: &Shared,
     ctx: &egui::Context,
     frames: &FrameBuffer,
     out: &UnboundedSender<ClientMessage>,
+    pc_tx: &PcStateTx,
     sid: String,
     peer: String,
     ice: Vec<IceServer>,
 ) -> anyhow::Result<Session> {
     let pc = new_peer_connection(to_rtc_ice_servers(&ice), sid.clone(), peer.clone(), out.clone()).await?;
+    watch_pc_state(&pc, pc_tx.clone());
 
     let frames_cb = frames.clone();
     let ctx_cb = ctx.clone();
