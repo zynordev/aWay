@@ -62,6 +62,25 @@ impl Signaling {
         self.outbound.send(msg).map_err(|_| anyhow!("sinyal bağlantısı kapandı"))
     }
 
+    /// Yeni hesap oluştur (sunucuda açık kayıt etkinse). Başarılıysa kullanıcı adı döner.
+    pub async fn register(&mut self, username: &str, password: &str) -> Result<String> {
+        self.send(ClientMessage::Register {
+            protocol_version: PROTOCOL_VERSION,
+            username: username.to_string(),
+            password: password.to_string(),
+        })?;
+        loop {
+            match self.inbound.recv().await {
+                Some(ServerMessage::Registered { username }) => return Ok(username),
+                Some(ServerMessage::Error { code, message }) => {
+                    return Err(anyhow!("kayıt hatası {code:?}: {message}"))
+                }
+                Some(_) => continue,
+                None => return Err(anyhow!("bağlantı kapandı")),
+            }
+        }
+    }
+
     /// Giriş yap; başarılıysa session_token döner.
     pub async fn login(&mut self, username: &str, password: &str) -> Result<String> {
         self.send(ClientMessage::Login {

@@ -22,6 +22,8 @@ use crate::signaling::Signaling;
 pub enum Screen {
     /// Giriş formu (sunucu + kullanıcı + şifre).
     Login,
+    /// Hesap oluşturma formu (sunucu + kullanıcı + şifre + şifre tekrar).
+    Register,
     /// Ana ekran: kendi kullanıcı adın + bağlan kutusu; gelen bağlantıyı dinler.
     Home,
     /// Giden bağlantı kuruluyor.
@@ -55,6 +57,8 @@ pub type Shared = Arc<Mutex<UiState>>;
 /// UI -> motor komutları.
 pub enum UiCommand {
     Login { server: String, user: String, pass: String },
+    /// Hesap oluştur, ardından aynı bilgilerle otomatik giriş yap.
+    Register { server: String, user: String, pass: String },
     Connect { to: String },
     Accept,
     Hangup,
@@ -109,35 +113,50 @@ pub async fn run_engine(
     fps: u32,
 ) {
     let mut sig = loop {
-        match cmd_rx.recv().await {
-            Some(UiCommand::Login { server, user, pass }) => {
-                set_status(&shared, &ctx, "sunucuya bağlanılıyor…");
-                let mut s = match Signaling::connect(&server).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        set_screen(&shared, &ctx, Screen::Login, format!("bağlanılamadı: {e}"));
-                        continue;
-                    }
-                };
-                match s.login(&user, &pass).await {
-                    Ok(_) => {
-                        {
-                            let mut st = shared.lock().unwrap();
-                            st.my_username = Some(user.clone());
-                            st.screen = Screen::Home;
-                            st.status = "hazır".into();
-                        }
-                        ctx.request_repaint();
-                        break s;
-                    }
-                    Err(e) => {
-                        set_screen(&shared, &ctx, Screen::Login, format!("giriş başarısız: {e}"));
-                        continue;
-                    }
-                }
-            }
+        // Giriş öncesi yalnızca Login/Register anlamlı; ikisi de aynı akışı izler
+        // (kayıt varsa önce hesabı aç), sonuçta oturum açılırsa döngüden çıkılır.
+        let (server, user, pass, new_account) = match cmd_rx.recv().await {
+            Some(UiCommand::Login { server, user, pass }) => (server, user, pass, false),
+            Some(UiCommand::Register { server, user, pass }) => (server, user, pass, true),
             Some(_) => continue, // giriş öncesi diğer komutlar yok sayılır
             None => return,
+        };
+        // Hata durumunda kullanıcıyı geldiği forma geri gönder.
+        let form = if new_account { Screen::Register } else { Screen::Login };
+
+        set_status(&shared, &ctx, "sunucuya bağlanılıyor…");
+        let mut s = match Signaling::connect(&server).await {
+            Ok(s) => s,
+            Err(e) => {
+                set_screen(&shared, &ctx, form.clone(), format!("bağlanılamadı: {e}"));
+                continue;
+            }
+        };
+
+        if new_account {
+            set_status(&shared, &ctx, "hesap oluşturuluyor…");
+            if let Err(e) = s.register(&user, &pass).await {
+                set_screen(&shared, &ctx, form.clone(), format!("hesap oluşturulamadı: {e}"));
+                continue;
+            }
+            set_status(&shared, &ctx, "hesap açıldı, giriş yapılıyor…");
+        }
+
+        match s.login(&user, &pass).await {
+            Ok(_) => {
+                {
+                    let mut st = shared.lock().unwrap();
+                    st.my_username = Some(user.clone());
+                    st.screen = Screen::Home;
+                    st.status = "hazır".into();
+                }
+                ctx.request_repaint();
+                break s;
+            }
+            Err(e) => {
+                set_screen(&shared, &ctx, form.clone(), format!("giriş başarısız: {e}"));
+                continue;
+            }
         }
     };
 
@@ -184,7 +203,7 @@ async fn handle_command(
     fps: u32,
 ) {
     match cmd {
-        UiCommand::Login { .. } => {} // zaten giriş yapıldı
+        UiCommand::Login { .. } | UiCommand::Register { .. } => {} // zaten giriş yapıldı
         UiCommand::Connect { to } => {
             if session.is_some() {
                 set_status(shared, ctx, "zaten bir oturumdasın");

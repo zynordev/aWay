@@ -17,6 +17,8 @@ pub struct AwayApp {
     f_server: String,
     f_user: String,
     f_pass: String,
+    /// Kayıt ekranındaki "şifre tekrar" alanı.
+    f_pass2: String,
     f_peer: String,
     // Otomatik bağlan (argümanla geldiyse), giriş sonrası bir kez tetiklenir
     auto_peer: Option<String>,
@@ -42,6 +44,7 @@ impl AwayApp {
             f_server: server,
             f_user: user,
             f_pass: pass,
+            f_pass2: String::new(),
             f_peer: String::new(),
             auto_peer,
             auto_done: false,
@@ -57,6 +60,13 @@ impl AwayApp {
         let mut s = self.shared.lock().unwrap();
         s.screen = Screen::Home;
         s.status = "hazır".into();
+    }
+
+    /// Giriş <-> Hesap oluştur geçişi (motoru ilgilendirmeyen saf UI geçişi).
+    fn go_screen(&self, screen: Screen, status: &str) {
+        let mut s = self.shared.lock().unwrap();
+        s.screen = screen;
+        s.status = status.into();
     }
 }
 
@@ -95,6 +105,7 @@ impl eframe::App for AwayApp {
 
         egui::CentralPanel::default().show(ctx, |ui| match screen {
             Screen::Login => self.ui_login(ui),
+            Screen::Register => self.ui_register(ui),
             Screen::Home => self.ui_home(ui, my_username.as_deref()),
             Screen::Connecting { peer } => self.ui_connecting(ui, &peer),
             Screen::Incoming { from } => self.ui_incoming(ui, &from),
@@ -124,13 +135,80 @@ impl AwayApp {
             ui.end_row();
         });
         ui.add_space(12.0);
-        if ui.button("Giriş yap").clicked() {
-            self.send(UiCommand::Login {
-                server: self.f_server.clone(),
-                user: self.f_user.clone(),
-                pass: self.f_pass.clone(),
-            });
-        }
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(egui::RichText::new("Giriş yap").strong())).clicked() {
+                self.send(UiCommand::Login {
+                    server: self.f_server.clone(),
+                    user: self.f_user.clone(),
+                    pass: self.f_pass.clone(),
+                });
+            }
+            ui.add_space(8.0);
+            if ui.button("Hesap oluştur").clicked() {
+                self.f_pass2.clear();
+                self.go_screen(Screen::Register, "yeni hesap");
+            }
+        });
+    }
+
+    fn ui_register(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            ui.heading("aWay — Hesap oluştur");
+            ui.add_space(16.0);
+        });
+        egui::Grid::new("kayit").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+            ui.label("Sunucu");
+            ui.add(egui::TextEdit::singleline(&mut self.f_server).desired_width(280.0));
+            ui.end_row();
+            ui.label("Kullanıcı");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.f_user)
+                    .hint_text("bağlanırken yazılacak ad")
+                    .desired_width(280.0),
+            );
+            ui.end_row();
+            ui.label("Şifre");
+            ui.add(egui::TextEdit::singleline(&mut self.f_pass).password(true).desired_width(280.0));
+            ui.end_row();
+            ui.label("Şifre (tekrar)");
+            ui.add(egui::TextEdit::singleline(&mut self.f_pass2).password(true).desired_width(280.0));
+            ui.end_row();
+        });
+
+        // Sunucuya gitmeden önce basit doğrulama; hata mesajı durum çubuğunda gösterilir.
+        let user = self.f_user.trim().to_string();
+        let problem = if user.is_empty() {
+            Some("kullanıcı adı boş olamaz")
+        } else if self.f_pass.is_empty() {
+            Some("şifre boş olamaz")
+        } else if self.f_pass != self.f_pass2 {
+            Some("şifreler eşleşmiyor")
+        } else {
+            None
+        };
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(egui::RichText::new("Hesabı oluştur").strong())).clicked() {
+                match problem {
+                    Some(msg) => self.go_screen(Screen::Register, msg),
+                    None => self.send(UiCommand::Register {
+                        server: self.f_server.clone(),
+                        user,
+                        pass: self.f_pass.clone(),
+                    }),
+                }
+            }
+            ui.add_space(8.0);
+            if ui.button("Girişe dön").clicked() {
+                self.go_screen(Screen::Login, "");
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Hesap açıldıktan sonra otomatik giriş yapılır.").weak(),
+        );
     }
 
     fn ui_home(&mut self, ui: &mut egui::Ui, me: Option<&str>) {
