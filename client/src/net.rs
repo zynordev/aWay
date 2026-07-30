@@ -6,6 +6,7 @@
 //! olay döngüsünde yürütür; gelen bağlantıda kullanıcıdan Kabul/Ret bekler.
 
 use crate::frame::FrameBuffer;
+use crate::input::{self, InputEvent};
 use crate::video;
 use crate::webrtc_conn::{new_peer_connection, to_rtc_ice_servers};
 use anyhow::anyhow;
@@ -76,6 +77,8 @@ pub enum UiCommand {
     Accept,
     Hangup,
     Reject,
+    /// VIEWER: fare/klavye olayını karşı tarafa ilet. Oturum yoksa yok sayılır.
+    Input(InputEvent),
 }
 
 enum Role {
@@ -110,6 +113,9 @@ struct Session {
     /// ucu o ana kadar burada bekler. Erken başlatılırsa ilk IDR henüz bağlanmamış
     /// track'e yazılıp kaybolur ve izleyici uzun süre siyah ekran görür.
     capture_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// VIEWER: giriş olaylarının çıkış ucu. Oturum düşünce bu da düşer; karşı taraftaki
+    /// enjektör thread'i kapanır ve basılı kalan tuşlar bırakılır.
+    input_tx: Option<UnboundedSender<InputEvent>>,
 }
 
 /// Kabul bekleyen gelen istek.
@@ -359,6 +365,11 @@ async fn handle_command(
             frames.take(); // son kareyi temizle
             set_screen(shared, ctx, Screen::Home, "bağlantı kapatıldı");
         }
+        UiCommand::Input(ev) => {
+            if let Some(tx) = session.as_ref().and_then(|s| s.input_tx.as_ref()) {
+                let _ = tx.send(ev);
+            }
+        }
     }
 }
 
@@ -458,6 +469,11 @@ async fn start_host(
     video::spawn_sample_writer(track, enc_rx, fps);
     // Yakalama BAŞLATILMAZ — bağlantı `Connected` olunca run_engine başlatır.
 
+    // Giriş kanalı da offer'dan ÖNCE açılmalı (SDP'ye application m-line'ı girsin).
+    // Kanalı host açar ama akış ters yönde: viewer yazar, host okur ve enjekte eder.
+    let input_dc = pc.create_data_channel(input::CHANNEL, None).await?;
+    input::wire_host_channel(&input_dc);
+
     out.send(ClientMessage::ConnectResponse {
         session: inc.session.clone(),
         to: inc.from.clone(),
@@ -484,6 +500,7 @@ async fn start_host(
         remote_set: false,
         pending: Vec::new(),
         capture_tx: Some(enc_tx),
+        input_tx: None, // host giriş göndermez, alır
     })
 }
 
@@ -518,6 +535,25 @@ async fn start_viewer(
         })
     }));
 
+    // Giriş kanalını host açar; biz yalnızca karşılayıp gönderici görevine bağlarız.
+    // Kanal gelmeden UI'dan olay akmaya başlayabileceği için alıcı uç şimdiden kurulur
+    // ve kanal gelene kadar olaylar `spawn_sender` içinde düşürülür.
+    let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel::<InputEvent>();
+    let in_rx = Arc::new(Mutex::new(Some(in_rx)));
+    pc.on_data_channel(Box::new(move |dc| {
+        let slot = in_rx.clone();
+        Box::pin(async move {
+            if dc.label() != input::CHANNEL {
+                return;
+            }
+            // Alıcı uç tektir: kanal bir kez bağlanır, tekrar gelirse yok sayılır.
+            let rx = slot.lock().unwrap().take();
+            if let Some(rx) = rx {
+                input::spawn_sender(dc, rx);
+            }
+        })
+    }));
+
     set_screen(shared, ctx, Screen::Connecting { peer: peer.clone() }, "kabul edildi, video bekleniyor…");
 
     Ok(Session {
@@ -528,6 +564,7 @@ async fn start_viewer(
         remote_set: false,
         pending: Vec::new(),
         capture_tx: None, // viewer ekran yakalamaz
+        input_tx: Some(in_tx),
     })
 }
 

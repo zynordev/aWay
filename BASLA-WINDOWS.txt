@@ -20,6 +20,13 @@ Sinyal sunucusu CANLI: wss://away.bilgicoderteam.tr/ws  (istemcinin varsayılan�
    -> "Hesabı oluştur"; hesap açılınca otomatik giriş yapılır.
    Ana ekranda karşının adını yazıp "Bağlan"; sana bağlanınca "Kabul/Ret" çıkar.
 
+   Uzak ekranı izlerken FARE + KLAVYE de çalışır (M4). Üstteki "Kontrol" kutusu açıkken
+   pencerede yaptığın her şey karşıya gider. Kapatırsan sadece izlersin.
+   - İmleç: kendi imlecin uzaktakinin bulunduğu yeri gösterir (yakalama uzak imleci
+     çizmiyor; karşı taraf fareyi oynatırsa sen göremezsin — bu normal, M6'da eklenecek).
+   - Türkçe harfler (ğ, ı, ş, ç…) doğru gider: düzeni SENİN makinen çözüyor.
+   - Ctrl+Alt+Del gitmez (Windows bunu hiçbir uygulamaya iletmez, AnyDesk de ayrı yolla yapar).
+
    Hazır hesaplar (canlı sunucuda): halil / 123 , erdem / 456 , test / test1234 , test2 / test1234
    İki pencere aç:
      .\target\release\away-client.exe --user test  --pass test1234

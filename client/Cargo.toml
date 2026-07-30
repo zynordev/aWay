@@ -12,7 +12,7 @@ license.workspace = true
 
 [features]
 default = []
-media = ["dep:scrap", "dep:openh264", "dep:bytes", "dep:eframe", "dep:egui"]
+media = ["dep:scrap", "dep:openh264", "dep:bytes", "dep:eframe", "dep:egui", "dep:enigo"]
 
 [dependencies]
 anyhow.workspace = true
@@ -34,3 +34,6 @@ openh264 = { version = "0.6", optional = true }
 bytes = { version = "1", optional = true }
 eframe = { version = "0.28", optional = true }
 egui = { version = "0.28", optional = true }
+# Uzaktan giriş enjeksiyonu (Windows SendInput / Linux X11 XTest).
+# Linux'ta derlemek için libxkbcommon-dev gerekir; Windows'ta ek bağımlılık yok.
+enigo = { version = "0.6", optional = true }

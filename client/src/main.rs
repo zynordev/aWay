@@ -25,6 +25,8 @@ mod encode;
 #[cfg(feature = "media")]
 mod frame;
 #[cfg(feature = "media")]
+mod input;
+#[cfg(feature = "media")]
 mod net;
 #[cfg(feature = "media")]
 mod video;

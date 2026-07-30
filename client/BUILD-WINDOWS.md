@@ -16,6 +16,10 @@ getirdiği için bir C/C++ toolchain ister. Bu adımlar **senin Windows makinend
    - **ya da** nasm kurmadan: ortam değişkeni `OPENH264_NO_ASM=1` ver → saf C ile derlenir
      (biraz daha yavaş ama sorunsuz). PowerShell: `$env:OPENH264_NO_ASM=1`
 
+> **Linux'ta `media` derlerken:** uzaktan giriş için `enigo` kullanılıyor ve bu, Linux'ta
+> `xkbcommon`'a bağlı. `sudo apt install libxkbcommon-dev` gerekir. Windows'ta ek bir şey
+> istemez. (CI yalnızca Windows derliyor.)
+
 ## 2. Derleme
 
 ```powershell
@@ -77,12 +81,36 @@ Hazır hesaplar: `halil / 123`, `erdem / 456`, `test / test1234`, `test2 / test1
 ## 4. Notlar / bilinenler
 
 - Renderer varsayılan **glow (OpenGL)**; wgpu ileride (M6) eklenebilir.
-- FPS: `--fps 30` (varsayılan). Ağır sahnelerde encode CPU'yu zorlarsa düşür.
+- FPS: `--fps 15` (varsayılan). Yakalama+encode tamamen yazılımsal olduğu için CPU maliyeti
+  doğrudan fps ile orantılı; güçlü makinede `--fps 30` denenebilir.
 - Encode/track/depacketize/decode hattı openh264 0.6 + webrtc-rs 0.17 API'lerine göre
   yazıldı ve kaynaktan doğrulandı; yine de ilk derlemede küçük bir uyarlama gerekirse
   `encode.rs` / `decode.rs` / `app.rs` / `net.rs` yereldir, hızlı düzeltilir.
-- Var: tek pencere GUI (giriş, ana ekran, **Kabul/Ret**, uzak ekran, ekran paylaşımı).
-- Henüz YOK (sıradaki milestone'lar): uzaktan fare/klavye (M4), ses/pano/dosya (M5),
-  gözetimsiz erişim + kalite/çözünürlük ayarları + tepsi ikonu (M6). Şu an tek seferde bir
-  oturum (bağlıyken gelen ikinci istek otomatik reddedilir).
+- Var: tek pencere GUI (giriş, ana ekran, **Kabul/Ret**, uzak ekran, ekran paylaşımı),
+  **uzaktan fare/klavye (M4)**.
+- Henüz YOK (sıradaki milestone'lar): ses/pano/dosya (M5), gözetimsiz erişim +
+  kalite/çözünürlük ayarları + tepsi ikonu (M6). Şu an tek seferde bir oturum
+  (bağlıyken gelen ikinci istek otomatik reddedilir).
+
+## 5. Uzaktan giriş (M4)
+
+Uzak ekranı izlerken üstteki **"Kontrol"** kutusu açıkken (varsayılan) fare ve klavye
+karşı makineye gider. Nasıl çalıştığı ve sınırları:
+
+- **Taşıma:** video track'inden ayrı bir WebRTC **data channel** (`"input"`). Kanalı HOST
+  açar (offer'ı o ürettiği için data channel offer'dan önce oluşturulmalı), ama akış ters
+  yönde: viewer yazar, host `enigo` ile işletim sistemine enjekte eder.
+- **Koordinatlar** 0..1 normalize gider; piksele çevirmeyi host kendi çözünürlüğüyle yapar.
+  Böylece iki tarafın ekran boyutu/oranı farklı olabilir. Görüntü en-boy oranı korunarak
+  çizilir ve kenardaki siyah (letterbox) alana yapılan tıklama karşıya GİTMEZ.
+- **Klavye düzeni izleyici tarafında çözülür**: normal yazı `Event::Text` olarak gider, yani
+  Türkçe karakterler host'un düzeninden bağımsız doğru düşer. Ctrl/Alt'lı kısayollarda ise
+  tuşun kendisi iletilir (Ctrl+C, Ctrl+V…).
+- **Basılı kalan tuş koruması:** Ctrl/Shift/Alt durumu her karede farkla türetilir; uzak
+  ekrandan çıkınca, "Kontrol"ü kapatınca ya da oturum düşünce hepsi bırakılır (host'ta
+  enjektör thread'i kapanırken `enigo` da basılı tuşları serbest bırakır).
+- **Bilinen sınırlar:** uzak imleç çizilmiyor (DXGI yakalaması imleci içermez — sen kendi
+  imlecinle konumu görürsün, ama karşı taraf fareyi oynatırsa göremezsin). Ctrl+Alt+Del ve
+  UAC penceresi gitmez (Windows bunları normal uygulamalara iletmez); host'ta uygulama
+  yönetici yetkisiyle çalışmıyorsa yönetici pencerelerine tıklanamaz.
 ```
