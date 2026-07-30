@@ -15,10 +15,12 @@ Sinyal sunucusu CANLI: wss://away.bilgicoderteam.tr/ws  (istemcinin varsayılan�
 
 3) Çalıştır — tek pencere GUI (flag yok):
    .\target\release\away-client.exe
-   Açılan pencerede kullanıcı adı + şifre ile giriş yap (hesabı sistem sahibi verir).
+   Açılan pencerede kullanıcı adı + şifre ile giriş yap.
+   Hesabın yoksa giriş ekranındaki "Hesap oluştur" -> kullanıcı adı + şifre (2 kez)
+   -> "Hesabı oluştur"; hesap açılınca otomatik giriş yapılır.
    Ana ekranda karşının adını yazıp "Bağlan"; sana bağlanınca "Kabul/Ret" çıkar.
 
-   Hızlı test için hazır iki hesap (canlı sunucuda): test / test1234  ve  test2 / test1234
+   Hazır hesaplar (canlı sunucuda): halil / 123 , erdem / 456 , test / test1234 , test2 / test1234
    İki pencere aç:
      .\target\release\away-client.exe --user test  --pass test1234
      .\target\release\away-client.exe --user test2 --pass test1234 --connect test

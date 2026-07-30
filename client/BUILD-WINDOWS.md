@@ -52,7 +52,20 @@ Beklenen akış: test2 bağlanınca **test penceresinde "Gelen bağlantı → Ka
 çıkar. Kabul et'e basınca test2'nin penceresinde test'in ekranı görünür (tek makinede
 "aynalar koridoru" etkisi normaldir — uçtan uca boru hattının çalıştığını kanıtlar).
 İki ayrı laptopta: her birinde exe'yi çalıştır, kendi hesabınla giriş yap, birbirinin adını
-yazıp bağlan. (Gerçek hesapları sistem sahibi `away-server adduser` ile açar.)
+yazıp bağlan.
+
+### Hesap oluşturma
+
+Giriş ekranındaki **"Hesap oluştur"** düğmesi → kullanıcı adı + şifre (iki kez) →
+**"Hesabı oluştur"**. Hesap sunucuda açılır ve otomatik giriş yapılır. Kullanıcı adı
+zaten varsa sunucu "kullanıcı adı zaten var" der.
+
+Hazır hesaplar: `halil / 123`, `erdem / 456`, `test / test1234`, `test2 / test1234`.
+
+> Sunucu tarafı not: hesap deposu (`accounts.json`) **sunucu açılışında** belleğe okunur.
+> Bu yüzden servis çalışırken `away-server adduser` ile hesap eklemek işe yaramaz
+> (hatta sunucunun bir sonraki yazımında üzerine yazılır) — hesapları uygulamadaki
+> "Hesap oluştur" ile aç, ya da adduser'dan sonra `systemctl restart away-server` yap.
 
 > Yerel geliştirme sunucusu isteyene: `--server ws://127.0.0.1:9000/ws` ile kendi
 > `cargo run -p away-server`'ına bağlanabilirsin.
