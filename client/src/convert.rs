@@ -49,11 +49,13 @@ pub struct I420 {
     row: Vec<[u32; 3]>,
     /// Kroma için biriktirilen çift satır (4:2:0 iki satırda bir yazılır).
     crow: Vec<[u32; 3]>,
-    /// Her çıktı sütununun kaynaktaki [başlangıç, bitiş) piksel aralığı. Kare başına
-    /// yeniden hesaplanmaz; yalnızca boyut değişince kurulur.
-    cols: Vec<(usize, usize)>,
-    /// `cols`'un hangi kaynak genişliği/çıktı genişliği için kurulduğu.
-    cols_for: (usize, usize),
+    /// Her çıktı sütununun kaç kaynak pikselinden beslendiği. Aralık (başlangıç, bitiş)
+    /// yerine SAYI tutuluyor: hücreler kaynağı boşluksuz döşediği için kaynak satırı tek
+    /// bir sıralı geçişte gezip sayıları tüketmek yeterli — çıktı pikseli başına dilim
+    /// kurmak (ve sınır denetimi) ortadan kalkıyor.
+    counts: Vec<u32>,
+    /// `counts`'un hangi kaynak genişliği/çıktı genişliği için kurulduğu.
+    counts_for: (usize, usize),
 }
 
 impl I420 {
@@ -66,8 +68,8 @@ impl I420 {
             v: Vec::new(),
             row: Vec::new(),
             crow: Vec::new(),
-            cols: Vec::new(),
-            cols_for: (0, 0),
+            counts: Vec::new(),
+            counts_for: (0, 0),
         }
     }
 
@@ -99,23 +101,24 @@ impl I420 {
         self.crow.resize(w / 2, [0; 3]);
     }
 
-    /// Çıktı sütunu -> kaynak sütun aralığı tablosunu (gerekirse) kur.
+    /// Çıktı sütunu -> kaç kaynak pikseli tablosunu (gerekirse) kur.
     ///
-    /// Sınırlar `x * src_w / dst_w` ile bölünür: her kaynak pikseli tam olarak bir çıktı
-    /// hücresine düşer, yani kare başına dokunulan piksel sayısı kaynağın kendisi kadardır.
-    fn ensure_cols(&mut self, src_w: usize) {
+    /// Sınırlar `x * src_w / dst_w` ile bölünür: hücreler kaynağı boşluksuz ve üst üste
+    /// binmeden döşer, toplamları tam olarak `src_w` eder. Küçültme yaptığımız için her
+    /// hücrede en az bir piksel vardır (büyütme çağıran tarafça engelleniyor).
+    fn ensure_counts(&mut self, src_w: usize) {
         let dst_w = self.width;
-        if self.cols_for == (src_w, dst_w) {
+        if self.counts_for == (src_w, dst_w) {
             return;
         }
-        self.cols.clear();
-        self.cols.reserve(dst_w);
+        self.counts.clear();
+        self.counts.reserve(dst_w);
         for x in 0..dst_w {
             let x0 = x * src_w / dst_w;
-            let x1 = (((x + 1) * src_w) / dst_w).max(x0 + 1).min(src_w);
-            self.cols.push((x0, x1));
+            let x1 = ((x + 1) * src_w) / dst_w;
+            self.counts.push((x1 - x0) as u32);
         }
-        self.cols_for = (src_w, dst_w);
+        self.counts_for = (src_w, dst_w);
     }
 }
 
@@ -161,19 +164,19 @@ pub fn bgra_to_i420(
         return;
     }
     out.resize(w, h);
-    out.ensure_cols(src_w);
+    out.ensure_counts(src_w);
 
     // Alanları ayrı ayrı ödünç al: `row`/`crow` ara bellekleri ile `y/u/v` hedefleri
     // aynı anda değiştirilebilsin.
-    let I420 { y, u, v, row, crow, cols, .. } = out;
+    let I420 { y, u, v, row, crow, counts, .. } = out;
     let uw = w / 2;
     let scaled = w != src_w || h != src_h;
 
     for oy in 0..h {
         if scaled {
             let y0 = oy * src_h / h;
-            let y1 = (((oy + 1) * src_h) / h).max(y0 + 1).min(src_h);
-            downsample_row(src, stride, y0, y1, cols, row);
+            let y1 = ((oy + 1) * src_h) / h;
+            downsample_row(src, stride, src_w, y0, y1, counts, row);
         } else {
             copy_row(src, stride, oy, row);
         }
@@ -215,32 +218,43 @@ fn copy_row(src: &[u8], stride: usize, oy: usize, out: &mut [[u32; 3]]) {
     }
 }
 
-/// Bir çıktı satırı üret: kaynağın `y0..y1` satırlarını, `cols`'taki sütun aralıklarıyla
-/// tanımlanan dikdörtgenler üzerinden ortalar.
+/// Bir çıktı satırı üret: kaynağın `y0..y1` satırlarını, `counts`'un tanımladığı sütun
+/// hücreleri üzerinden ortalar (alan ortalaması / box filter).
+///
+/// Kaynak satırı TEK SIRALI GEÇİŞTE gezilir: hücreler boşluksuz döşediği için, piksel
+/// akışını tüketirken hücre sayacı bittiğinde bir sonraki hücreye geçmek yeterli. Önceki
+/// sürüm çıktı pikseli başına `row[x0*4..x1*4]` dilimi kuruyordu; 1920 genişlikte bu, kare
+/// başına ~1200 dilim + sınır denetimi demekti ve ölçekli modu 1:1'den pahalı yapıyordu.
 fn downsample_row(
     src: &[u8],
     stride: usize,
+    src_w: usize,
     y0: usize,
     y1: usize,
-    cols: &[(usize, usize)],
+    counts: &[u32],
     out: &mut [[u32; 3]],
 ) {
     for dst in out.iter_mut() {
         *dst = [0; 3];
     }
     for sy in y0..y1 {
-        let row = &src[sy * stride..];
-        for (dst, &(x0, x1)) in out.iter_mut().zip(cols) {
-            for px in row[x0 * 4..x1 * 4].chunks_exact(4) {
-                dst[0] += u32::from(px[2]);
-                dst[1] += u32::from(px[1]);
-                dst[2] += u32::from(px[0]);
+        let row = &src[sy * stride..][..src_w * 4];
+        let mut px = row.chunks_exact(4);
+        for (dst, &cnt) in out.iter_mut().zip(counts) {
+            for _ in 0..cnt {
+                // `counts` toplamı tam olarak `src_w` olduğundan akış bitmez. Yine de
+                // panik yerine sessizce çıkıyoruz: bölme aşağıda yine çalışır, yani en
+                // kötü ihtimalle satırın sonu biraz karanlık olur, çöp piksel çıkmaz.
+                let Some(p) = px.next() else { break };
+                dst[0] += u32::from(p[2]);
+                dst[1] += u32::from(p[1]);
+                dst[2] += u32::from(p[0]);
             }
         }
     }
     let rows = (y1 - y0) as u32;
-    for (dst, &(x0, x1)) in out.iter_mut().zip(cols) {
-        let d = rows * (x1 - x0) as u32;
+    for (dst, &cnt) in out.iter_mut().zip(counts) {
+        let d = rows * cnt;
         dst[0] /= d;
         dst[1] /= d;
         dst[2] /= d;

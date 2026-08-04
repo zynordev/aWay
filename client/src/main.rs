@@ -51,10 +51,14 @@ struct Args {
     /// (çekirdek) verilirse arayan, verilmezse bekleyen olur.
     #[arg(long)]
     connect: Option<String>,
-    /// (media) Paylaşım kare hızı. Yakalama+encode tamamen yazılımsal olduğundan CPU
-    /// maliyeti doğrudan bununla orantılı; masaüstü için 15 akıcı ve belirgin şekilde
-    /// ucuz. Güçlü makinede `--fps 30` denenebilir.
-    #[arg(long, default_value_t = 15)]
+    /// (media) Paylaşım kare hızı — aynı zamanda GECİKME/KALİTE DENGESİNİN ANA AYARI.
+    ///
+    /// Otomatik çözünürlük, kare başına bütçeyi buradan alır (1000/fps ms) ve makinenin
+    /// o bütçeye sığdığı en büyük boyutu seçer. Yani fps'i yükseltmek bütçeyi daraltır:
+    /// çözünürlük biraz düşer ama hem kareler daha sık gelir hem de her karenin
+    /// üretilmesi daha kısa sürer — ikisi de doğrudan gecikme. Düşürmek tersi:
+    /// daha keskin görüntü, daha fazla gecikme, daha az CPU.
+    #[arg(long, default_value_t = 20)]
     fps: u32,
     /// (media) Çözünürlüğü SABİTLE: 1 = tam, 2 = yarı… Verilmezse çözünürlük otomatik
     /// ayarlanır — tam çözünürlükte başlanır, makine kare başına bütçeyi (1/fps) aşarsa
@@ -111,6 +115,11 @@ fn run_gui(args: Args) -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("aWay")
             .with_inner_size([900.0, 600.0]),
+        // Vsync KAPALI: uzak ekranı izlerken çözülmüş kare, ekranın bir sonraki
+        // tazeleme anına kadar bekletiliyordu (60 Hz'de kare başına 16 ms'ye kadar,
+        // çift tamponlamada daha da fazla). Burada çizdiğimiz şey canlı bir görüntü,
+        // yırtılma riskinden çok anındalık önemli.
+        vsync: false,
         ..Default::default()
     };
 

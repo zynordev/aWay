@@ -81,8 +81,8 @@ Hazır hesaplar: `halil / 123`, `erdem / 456`, `test / test1234`, `test2 / test1
 ## 4. Notlar / bilinenler
 
 - Renderer varsayılan **glow (OpenGL)**; wgpu ileride (M6) eklenebilir.
-- FPS: `--fps 15` (varsayılan). Yakalama+encode tamamen yazılımsal olduğu için CPU maliyeti
-  doğrudan fps ile orantılı; güçlü makinede `--fps 30` denenebilir.
+- FPS: `--fps 20` (varsayılan). Yalnızca kare hızı değil, gecikme/kalite dengesinin ana
+  ayarı — bkz. bölüm 6.
 - Çözünürlük: varsayılan **otomatik küçültme** — bkz. bölüm 6.
 - Encode/track/depacketize/decode hattı openh264 0.6 + webrtc-rs 0.17 API'lerine göre
   yazıldı ve kaynaktan doğrulandı; yine de ilk derlemede küçük bir uyarlama gerekirse
@@ -175,18 +175,35 @@ akıcı ve düşük gecikmeli olur. Bu davranışı istemiyorsan `--scale` ile s
 ### Ayarlar
 
 ```powershell
-away-client.exe                 # varsayılan: otomatik çözünürlük (önerilen)
+away-client.exe                 # varsayılan: otomatik çözünürlük, 20 fps
+away-client.exe --fps 30        # DAHA AZ GECİKME, biraz daha yumuşak görüntü
+away-client.exe --fps 12        # DAHA KESKİN görüntü, biraz daha fazla gecikme, az CPU
 away-client.exe --scale 1       # tam çözünürlükte SABİTLE (otomatik koruma kapanır)
-away-client.exe --scale 2       # yarı çözünürlükte sabitle
-away-client.exe --fps 10        # kare hızını düşür → kare başına bütçe artar,
-                                #   otomatik mod daha yüksek çözünürlükte kalır
-away-client.exe --bitrate 8000  # daha net görüntü (internet yüklemesi elveriyorsa)
+away-client.exe --bitrate 8000  # bloklu görünüyorsa (yükleme elveriyorsa)
 away-client.exe --bitrate 1500  # yükleme dar / kareler geç geliyorsa
 ```
 
-**Görüntü yumuşak ama akıcı** → makine tam çözünürlüğe yetişmiyor demektir; `--fps 10`
-denersen otomatik mod daha yüksek çözünürlükte kalabilir. **Akıcı ama bloklu** →
-`--bitrate` artır.
+**`--fps` bu uygulamada sadece kare hızı değil, gecikme/kalite kolunun kendisidir.**
+Otomatik çözünürlük kare başına bütçeyi `1000/fps` ms olarak alır:
+
+- `--fps` yükseltmek → bütçe daralır → çözünürlük bir basamak düşebilir, ama hem kareler
+  daha sık gelir hem her kare daha kısa sürede üretilir. **İkisi de doğrudan gecikme.**
+- `--fps` düşürmek → bütçe genişler → daha keskin görüntü, daha fazla gecikme, daha az CPU.
+
+**Akıcı ama bloklu** → `--bitrate` artır (bu ayrı bir eksen, gecikmeyle ilgisi yok).
+
+### Gecikmeye özel (izleyici tarafı)
+
+- **Vsync kapatıldı.** Çözülen kare, ekranın bir sonraki tazeleme anına kadar bekletiliyordu
+  (60 Hz'de kare başına 16 ms'ye kadar, çift tamponlamada daha fazla). Canlı görüntüde
+  yırtılma riskinden çok anındalık önemli.
+- **Decode BİLEREK tek thread.** openh264'ün çok thread'li decode'u kare seviyesinde boru
+  hattı: erişim birimini bir worker'a verip en eski thread'in resmini bekliyor, yani N
+  thread = N-1 kare GECİKME ekler (`welsDecoderExt.cpp`, `ThreadDecodeFrameInternal`).
+  Bizim istediğimizin tam tersi, o yüzden `DECODER_OPTION_NUM_OF_THREADS` açılmadı.
+- **Ölçekleyici tek sıralı geçişe indirildi.** Alan ortalamalı ölçekleme çıktı pikseli
+  başına dilim kuruyordu (1920 genişlikte kare başına ~1200 dilim + sınır denetimi) ve
+  ölçekli modu 1:1'den pahalı yapıyordu; artık kaynak satırı bir kez sırayla geziliyor.
 
 ### Ölçüm (tahmin etme, bak)
 

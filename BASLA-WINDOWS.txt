@@ -38,11 +38,12 @@ Sinyal sunucusu CANLI: wss://away.bilgicoderteam.tr/ws  (istemcinin varsayılan�
    ÇÖZÜNÜRLÜK ARTIK OTOMATİK: tam çözünürlükte başlar, makine yetişemezse bir basamak
    iner (1920 -> 1536 -> 1228 -> 982 -> 784 -> 640), rahatladıkça geri çıkar.
    Değişimler konsola yazılır:  çözünürlük 1920x1080 -> 1536x864
+   --fps SADECE KARE HIZI DEĞİL, GECİKME/KALİTE KOLUNUN KENDİSİ. Otomatik çözünürlük
+   kare başına bütçeyi 1000/fps ms olarak alır (varsayılan 20 -> 50 ms):
+     .\away-client.exe --fps 30        # DAHA AZ GECIKME, biraz daha yumusak goruntu
+     .\away-client.exe --fps 12        # DAHA KESKIN goruntu, biraz daha fazla gecikme
      .\away-client.exe --scale 1       # tam çözünürlükte SABİTLE (koruma kapanır)
-     .\away-client.exe --scale 2       # yarı çözünürlükte sabitle
-     .\away-client.exe --fps 10        # kare basina butce artar -> otomatik mod
-                                       #   daha yuksek cozunurlukte kalir
-     .\away-client.exe --bitrate 8000  # daha net (internet yüklemesi elveriyorsa)
+     .\away-client.exe --bitrate 8000  # bloklu görünüyorsa (yükleme elveriyorsa)
      .\away-client.exe --bitrate 1500  # yükleme dar / kareler geç geliyorsa
 
    ÖLÇÜM — tahmin etme, iki sayıya bak:
