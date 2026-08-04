@@ -14,7 +14,8 @@ use tokio::sync::mpsc;
 #[derive(Clone, Copy)]
 pub struct VideoOpts {
     pub fps: u32,
-    /// Ölçek böleni; `None` ise çözünürlüğe göre otomatik (bkz. `convert::auto_scale`).
+    /// Ölçek böleni. Verilirse çözünürlük SABİTLENİR (otomatik uyarlama kapanır);
+    /// verilmezse makinenin yetiştiği en büyük boyut ölçülerek seçilir.
     pub scale: Option<u32>,
     /// Hedef bit hızı; `None` ise çözünürlük+fps'ten hesaplanır.
     pub bitrate_kbps: Option<u32>,
@@ -55,12 +56,22 @@ fn capture_encode_loop(tx: &mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) 
     let mut capturer = Capturer::new(display).map_err(|e| anyhow!("yakalayıcı: {e}"))?;
     let (sw, sh) = (capturer.width(), capturer.height());
 
-    let n = scale.map_or_else(|| convert::auto_scale(sw), |s| (s as usize).max(1));
-    let (ow, oh) = ((sw / n) & !1, (sh / n) & !1);
+    let mut ladder = match scale {
+        // Elle sabitlenmişse uyarlama yok: kullanıcı ne dediyse o.
+        Some(s) => {
+            let n = (s as usize).max(1);
+            Ladder::pinned(((sw / n) & !1, (sh / n) & !1))
+        }
+        None => Ladder::new(sw, sh, convert::auto_size(sw, sh)),
+    };
+    let (mut ow, mut oh) = ladder.current();
     if ow == 0 || oh == 0 {
-        return Err(anyhow!("ölçek çok büyük: {sw}x{sh} / {n}"));
+        return Err(anyhow!("geçersiz çıktı boyutu: {sw}x{sh} → {ow}x{oh}"));
     }
-    tracing::info!("ekran {sw}x{sh} → {ow}x{oh} (ölçek 1/{n}) @ {fps}fps");
+    tracing::info!(
+        "ekran {sw}x{sh} → {ow}x{oh} @ {fps}fps ({})",
+        if ladder.adaptive() { "otomatik çözünürlük" } else { "sabit" }
+    );
 
     let mut encoder = H264Encoder::new(ow, oh, fps, bitrate_kbps)?;
     let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
@@ -87,7 +98,7 @@ fn capture_encode_loop(tx: &mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) 
                 // scrap karesi BGRA; satır adımı dolgulu olabilir (stride >= sw*4).
                 // Dönüşüm doğrudan bu tampondan okur — araya sıkı bir kopya girmez.
                 let stride = buf.len() / sh;
-                convert::bgra_to_i420(&buf, stride, sw, sh, n, &mut cur);
+                convert::bgra_to_i420(&buf, stride, sw, sh, (ow, oh), &mut cur);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Bu tur yeni kare yok; kısa bekle.
@@ -111,7 +122,7 @@ fn capture_encode_loop(tx: &mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) 
             stats.skipped += 1;
             stats.convert += t_conv;
             sleep_rest(interval, t0);
-            stats.maybe_log(ow, oh, n);
+            stats.maybe_log(ow, oh);
             continue;
         }
 
@@ -122,7 +133,8 @@ fn capture_encode_loop(tx: &mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) 
 
         let t1 = Instant::now();
         let encoded = encoder.encode(&cur)?;
-        stats.encode += t1.elapsed();
+        let t_enc = t1.elapsed();
+        stats.encode += t_enc;
         stats.convert += t_conv;
         stats.frames += 1;
 
@@ -138,10 +150,149 @@ fn capture_encode_loop(tx: &mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) 
         std::mem::swap(&mut cur, &mut prev);
         have_prev = true;
 
+        // Makine yetişiyor mu? Ölçüyü kare BAŞINA gerçek maliyetten alıyoruz; uykuyu
+        // saymıyoruz, yoksa hedef fps'e uyan her şey "tam kapasite" görünürdü.
+        if let Some((nw, nh)) = ladder.observe(t_conv + t_enc, interval) {
+            tracing::info!("çözünürlük {ow}x{oh} → {nw}x{nh}");
+            (ow, oh) = (nw, nh);
+            encoder = H264Encoder::new(ow, oh, fps, bitrate_kbps)?;
+            // Boyut değişti: eski kare artık karşılaştırılamaz.
+            have_prev = false;
+            last_keyframe = Instant::now();
+        }
+
         sleep_rest(interval, t0);
-        stats.maybe_log(ow, oh, n);
+        stats.maybe_log(ow, oh);
     }
     Ok(())
+}
+
+/// Çözünürlük basamakları ve "makine yetişiyor mu" denetleyicisi.
+///
+/// Tam kalite ile düşük gecikme yazılımsal encode'da doğrudan çelişir: 1080p bir karenin
+/// kodlanması zayıf bir CPU'da 100 ms'yi aşabiliyor, bu da 7-8 fps ve her karede 100 ms+
+/// gecikme demek. Sabit bir çözünürlük seçmek yerine makinenin GERÇEKTEN yetiştiği en
+/// büyük boyutu ölçerek buluyoruz: hızlıysa tam çözünürlükte kalır, yavaşsa iner.
+///
+/// Basamaklar genişliği ~1,25 kat azaltır (piksel sayısında ~1,55 kat), yani her adım
+/// hissedilir ama uçurum değil.
+struct Ladder {
+    sizes: Vec<(usize, usize)>,
+    idx: usize,
+    /// Kare maliyetinin üstel hareketli ortalaması (ms). Tek bir yavaş kare (anahtar kare,
+    /// başka bir programın anlık yükü) çözünürlük düşürmemeli.
+    avg_ms: f64,
+    /// Üst üste kaç kare bütçeyi aştı.
+    over: u32,
+    /// Ne zamandır rahatça bütçenin altındayız (yukarı çıkmak için).
+    comfortable_since: Option<Instant>,
+    /// Son değişiklikten sonra ölçümün oturması için bekleme.
+    changed_at: Instant,
+}
+
+impl Ladder {
+    /// Bütçenin bu kadarını aşarsak küçül. Tam bütçeyi beklemek geç kalmak olur.
+    const OVER: f64 = 0.85;
+    /// Bunun altında kalırsak büyümeyi düşün. Bir üst basamak ~1,55 kat pahalı olduğu
+    /// için 0,5 eşiği büyüdükten sonra ~0,78'e denk gelir; yani salınmayız.
+    const UNDER: f64 = 0.5;
+    const OVER_STREAK: u32 = 4;
+    const COMFORT_HOLD: Duration = Duration::from_secs(10);
+    const COOLDOWN: Duration = Duration::from_secs(3);
+
+    fn pinned(size: (usize, usize)) -> Self {
+        Self::from_sizes(vec![size])
+    }
+
+    fn new(src_w: usize, src_h: usize, base: (usize, usize)) -> Self {
+        const MIN_WIDTH: usize = 640;
+        let mut sizes = Vec::new();
+        let mut width = base.0 & !1;
+        loop {
+            let h = convert::fit_height(src_w, src_h, width);
+            if width < 2 || h < 2 {
+                break;
+            }
+            sizes.push((width, h));
+            if width <= MIN_WIDTH {
+                break;
+            }
+            let next = (width * 4 / 5).max(MIN_WIDTH) & !1;
+            if next >= width {
+                break;
+            }
+            width = next;
+        }
+        if sizes.is_empty() {
+            sizes.push(base);
+        }
+        Self::from_sizes(sizes)
+    }
+
+    fn from_sizes(sizes: Vec<(usize, usize)>) -> Self {
+        Self {
+            sizes,
+            idx: 0,
+            avg_ms: 0.0,
+            over: 0,
+            comfortable_since: None,
+            changed_at: Instant::now(),
+        }
+    }
+
+    fn adaptive(&self) -> bool {
+        self.sizes.len() > 1
+    }
+
+    fn current(&self) -> (usize, usize) {
+        self.sizes[self.idx]
+    }
+
+    /// Bir karenin maliyetini bildir; basamak değiştiyse yeni boyutu döndürür.
+    fn observe(&mut self, cost: Duration, budget: Duration) -> Option<(usize, usize)> {
+        if !self.adaptive() {
+            return None;
+        }
+        let ms = cost.as_secs_f64() * 1000.0;
+        // İlk ölçümde ortalamayı doğrudan oraya oturt, yoksa sıfırdan tırmanırken
+        // gerçekten yavaş bir makinede birkaç saniye boşa gider.
+        self.avg_ms = if self.avg_ms == 0.0 { ms } else { self.avg_ms * 0.8 + ms * 0.2 };
+        let budget_ms = budget.as_secs_f64() * 1000.0;
+
+        if self.changed_at.elapsed() < Self::COOLDOWN {
+            return None;
+        }
+
+        if self.avg_ms > budget_ms * Self::OVER {
+            self.over += 1;
+            self.comfortable_since = None;
+            if self.over >= Self::OVER_STREAK && self.idx + 1 < self.sizes.len() {
+                self.idx += 1;
+                return Some(self.step_taken());
+            }
+            return None;
+        }
+
+        self.over = 0;
+        if self.avg_ms < budget_ms * Self::UNDER && self.idx > 0 {
+            let since = *self.comfortable_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Self::COMFORT_HOLD {
+                self.idx -= 1;
+                return Some(self.step_taken());
+            }
+        } else {
+            self.comfortable_since = None;
+        }
+        None
+    }
+
+    fn step_taken(&mut self) -> (usize, usize) {
+        self.over = 0;
+        self.comfortable_since = None;
+        self.avg_ms = 0.0;
+        self.changed_at = Instant::now();
+        self.current()
+    }
 }
 
 fn sleep_rest(interval: Duration, t0: Instant) {
@@ -172,7 +323,7 @@ impl Stats {
         }
     }
 
-    fn maybe_log(&mut self, w: usize, h: usize, n: usize) {
+    fn maybe_log(&mut self, w: usize, h: usize) {
         let el = self.since.elapsed();
         if el < STATS_INTERVAL {
             return;
@@ -180,7 +331,7 @@ impl Stats {
         let secs = el.as_secs_f64();
         let looked = (self.frames + self.skipped).max(1);
         tracing::info!(
-            "ekran {w}x{h} (1/{n}) | gönderilen {:.1} fps | atlanan {} | \
+            "ekran {w}x{h} | gönderilen {:.1} fps | atlanan {} | \
              dönüşüm {:.1} ms | encode {:.1} ms | {:.0} kbps",
             self.frames as f64 / secs,
             self.skipped,

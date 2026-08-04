@@ -56,10 +56,11 @@ struct Args {
     /// ucuz. Güçlü makinede `--fps 30` denenebilir.
     #[arg(long, default_value_t = 15)]
     fps: u32,
-    /// (media) Görüntüyü kaç kat küçülterek gönder (1 = tam çözünürlük, 2 = yarı…).
-    /// Verilmezse otomatik: 2560 pikselden geniş ekranlar (4K) yarıya iner, 1080p ve
-    /// 1440p tam çözünürlük gider. CPU ve gecikme doğrudan piksel sayısıyla orantılıdır —
-    /// makine yetişemiyorsa `--scale 2` belirgin rahatlama sağlar.
+    /// (media) Çözünürlüğü SABİTLE: 1 = tam, 2 = yarı… Verilmezse çözünürlük otomatik
+    /// ayarlanır — tam çözünürlükte başlanır, makine kare başına bütçeyi (1/fps) aşarsa
+    /// bir basamak inilir, rahatladıkça geri çıkılır. Yazılımsal encode'un maliyeti
+    /// doğrudan piksel sayısıyla orantılı olduğu için "tam kalite" ile "düşük gecikme"
+    /// çelişir; otomatik mod bu dengeyi ölçerek kurar. Sabitlersen bu koruma kapanır.
     #[arg(long)]
     scale: Option<u32>,
     /// (media) Hedef bit hızı (kbps). Verilmezse çözünürlük ve fps'ten hesaplanır

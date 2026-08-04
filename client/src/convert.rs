@@ -15,25 +15,24 @@
 use egui::Color32;
 use openh264::formats::YUVSource;
 
-/// Yakalanan genişliğe göre ölçek bölenini seç.
+/// Başlangıç çözünürlüğü: 2560 pikselden geniş ekranlar (4K) yarıya iner.
 ///
-/// Yazılımsal H264 encode'un maliyeti doğrudan piksel sayısıyla orantılı. Encoder artık
-/// çok çekirdekli çalıştığı için (bkz. `encode::enable_multicore`) 1080p ve 1440p tam
-/// çözünürlük gerçek zamanlı kodlanabiliyor — eski 1600 px sınırı bu yüzden gereksiz
-/// yere görüntüyü bulanıklaştırıyordu. Sınır artık yalnızca 4K gibi uçlar için var:
-/// 3840 px'te piksel sayısı 1080p'nin dört katı ve hiçbir yazılımsal encoder yetişmez.
-///
-/// 1920 → 1920 (tam), 2560 → 2560 (tam), 3840 → 1920 (yarı).
-///
-/// Tam sayı bölen kullanılır: n×n kutu ortalaması hem ucuzdur hem de metni keyfi
-/// yeniden örneklemeye göre daha az bozar.
-pub fn auto_scale(width: usize) -> usize {
+/// Buradan sonrasını ölçüm belirler — `capture` makinenin gerçekten yetiştiği boyuta
+/// kendisi iner/çıkar. Bu yalnızca "en fazla bu kadar" başlangıç noktasıdır.
+pub fn auto_size(src_w: usize, src_h: usize) -> (usize, usize) {
     const MAX_WIDTH: usize = 2560;
-    let mut n = 1;
-    while width / n > MAX_WIDTH {
-        n += 1;
+    if src_w <= MAX_WIDTH {
+        return (src_w & !1, src_h & !1);
     }
-    n
+    (src_w / 2 & !1, src_h / 2 & !1)
+}
+
+/// Kaynak en-boy oranını koruyarak verilen genişliğe karşılık gelen çift boyut.
+pub fn fit_height(src_w: usize, src_h: usize, dst_w: usize) -> usize {
+    if src_w == 0 {
+        return 0;
+    }
+    (dst_w * src_h / src_w) & !1
 }
 
 /// I420 (YUV 4:2:0) kare tamponu; doğrudan encoder'a verilir.
@@ -50,6 +49,11 @@ pub struct I420 {
     row: Vec<[u32; 3]>,
     /// Kroma için biriktirilen çift satır (4:2:0 iki satırda bir yazılır).
     crow: Vec<[u32; 3]>,
+    /// Her çıktı sütununun kaynaktaki [başlangıç, bitiş) piksel aralığı. Kare başına
+    /// yeniden hesaplanmaz; yalnızca boyut değişince kurulur.
+    cols: Vec<(usize, usize)>,
+    /// `cols`'un hangi kaynak genişliği/çıktı genişliği için kurulduğu.
+    cols_for: (usize, usize),
 }
 
 impl I420 {
@@ -62,6 +66,8 @@ impl I420 {
             v: Vec::new(),
             row: Vec::new(),
             crow: Vec::new(),
+            cols: Vec::new(),
+            cols_for: (0, 0),
         }
     }
 
@@ -92,6 +98,25 @@ impl I420 {
         self.crow.clear();
         self.crow.resize(w / 2, [0; 3]);
     }
+
+    /// Çıktı sütunu -> kaynak sütun aralığı tablosunu (gerekirse) kur.
+    ///
+    /// Sınırlar `x * src_w / dst_w` ile bölünür: her kaynak pikseli tam olarak bir çıktı
+    /// hücresine düşer, yani kare başına dokunulan piksel sayısı kaynağın kendisi kadardır.
+    fn ensure_cols(&mut self, src_w: usize) {
+        let dst_w = self.width;
+        if self.cols_for == (src_w, dst_w) {
+            return;
+        }
+        self.cols.clear();
+        self.cols.reserve(dst_w);
+        for x in 0..dst_w {
+            let x0 = x * src_w / dst_w;
+            let x1 = (((x + 1) * src_w) / dst_w).max(x0 + 1).min(src_w);
+            self.cols.push((x0, x1));
+        }
+        self.cols_for = (src_w, dst_w);
+    }
 }
 
 impl YUVSource for I420 {
@@ -112,29 +137,46 @@ impl YUVSource for I420 {
     }
 }
 
-/// BGRA ekran karesini I420'ye çevirir; AYNI geçişte `n` katı küçültür.
+/// BGRA ekran karesini I420'ye çevirir; AYNI geçişte hedef boyuta küçültür.
 ///
 /// `stride` satır adımıdır ve dolgulu olabilir (`stride >= src_w * 4`) — scrap
 /// Windows'ta böyle veriyor; bu yüzden önce sıkı bir kopya almaya gerek kalmıyor
 /// (eski kod 1080p'de kare başına 8 MB'ı boşuna kopyalıyordu).
 ///
+/// Hedef boyut TAM SAYI BÖLEN OLMAK ZORUNDA DEĞİL: alan ortalaması (box filter) ile
+/// keyfi boyuta inilir. 1080p → 720p gibi ara basamaklar bu yüzden mümkün; yalnızca
+/// tam bölenlerle 1080p'den sonraki adım 540p olurdu ve aradaki fark çok büyük.
+///
 /// Çıktı boyutları çifte yuvarlanır: H264 4:2:0 tek boyut kabul etmez.
-pub fn bgra_to_i420(src: &[u8], stride: usize, src_w: usize, src_h: usize, n: usize, out: &mut I420) {
-    let n = n.max(1);
-    let w = (src_w / n) & !1;
-    let h = (src_h / n) & !1;
-    if w == 0 || h == 0 {
+pub fn bgra_to_i420(
+    src: &[u8],
+    stride: usize,
+    src_w: usize,
+    src_h: usize,
+    dst: (usize, usize),
+    out: &mut I420,
+) {
+    let (w, h) = (dst.0 & !1, dst.1 & !1);
+    if w == 0 || h == 0 || w > src_w || h > src_h {
         return;
     }
     out.resize(w, h);
+    out.ensure_cols(src_w);
 
     // Alanları ayrı ayrı ödünç al: `row`/`crow` ara bellekleri ile `y/u/v` hedefleri
     // aynı anda değiştirilebilsin.
-    let I420 { y, u, v, row, crow, .. } = out;
+    let I420 { y, u, v, row, crow, cols, .. } = out;
     let uw = w / 2;
+    let scaled = w != src_w || h != src_h;
 
     for oy in 0..h {
-        downsample_row(src, stride, oy, n, row);
+        if scaled {
+            let y0 = oy * src_h / h;
+            let y1 = (((oy + 1) * src_h) / h).max(y0 + 1).min(src_h);
+            downsample_row(src, stride, y0, y1, cols, row);
+        } else {
+            copy_row(src, stride, oy, row);
+        }
 
         let yr = &mut y[oy * w..oy * w + w];
         for (dst, px) in yr.iter_mut().zip(row.iter()) {
@@ -165,32 +207,40 @@ pub fn bgra_to_i420(src: &[u8], stride: usize, src_w: usize, src_h: usize, n: us
     }
 }
 
-/// `oy` numaralı ÇIKTI satırını üret: kaynaktaki n×n bloklarının RGB ortalaması.
-fn downsample_row(src: &[u8], stride: usize, oy: usize, n: usize, out: &mut [[u32; 3]]) {
-    let w = out.len();
-    if n == 1 {
-        // Yaygın durum (küçük ekranlar): ölçekleme yok, yalnızca BGRA -> RGB.
-        let row = &src[oy * stride..][..w * 4];
-        for (dst, px) in out.iter_mut().zip(row.chunks_exact(4)) {
-            *dst = [u32::from(px[2]), u32::from(px[1]), u32::from(px[0])];
-        }
-        return;
+/// Ölçekleme yok: kaynak satırını doğrudan BGRA -> RGB olarak al.
+fn copy_row(src: &[u8], stride: usize, oy: usize, out: &mut [[u32; 3]]) {
+    let row = &src[oy * stride..][..out.len() * 4];
+    for (dst, px) in out.iter_mut().zip(row.chunks_exact(4)) {
+        *dst = [u32::from(px[2]), u32::from(px[1]), u32::from(px[0])];
     }
+}
+
+/// Bir çıktı satırı üret: kaynağın `y0..y1` satırlarını, `cols`'taki sütun aralıklarıyla
+/// tanımlanan dikdörtgenler üzerinden ortalar.
+fn downsample_row(
+    src: &[u8],
+    stride: usize,
+    y0: usize,
+    y1: usize,
+    cols: &[(usize, usize)],
+    out: &mut [[u32; 3]],
+) {
     for dst in out.iter_mut() {
         *dst = [0; 3];
     }
-    for sy in oy * n..oy * n + n {
-        let row = &src[sy * stride..][..w * n * 4];
-        for (dst, block) in out.iter_mut().zip(row.chunks_exact(n * 4)) {
-            for px in block.chunks_exact(4) {
+    for sy in y0..y1 {
+        let row = &src[sy * stride..];
+        for (dst, &(x0, x1)) in out.iter_mut().zip(cols) {
+            for px in row[x0 * 4..x1 * 4].chunks_exact(4) {
                 dst[0] += u32::from(px[2]);
                 dst[1] += u32::from(px[1]);
                 dst[2] += u32::from(px[0]);
             }
         }
     }
-    let d = (n * n) as u32;
-    for dst in out.iter_mut() {
+    let rows = (y1 - y0) as u32;
+    for (dst, &(x0, x1)) in out.iter_mut().zip(cols) {
+        let d = rows * (x1 - x0) as u32;
         dst[0] /= d;
         dst[1] /= d;
         dst[2] /= d;

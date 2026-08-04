@@ -148,35 +148,60 @@ encode 8 çekirdekte (çok dilimli)
   istiyordu, yani encode eden makineyi boşuna 60 fps çizime zorluyordu).
 - Yan fayda: openh264'ün kendi encoder/decoder çifti arasındaki renk aralığı uyuşmazlığı
   (kısıtlı yaz / tam oku) düzeldi — görüntü artık soluk değil.
-- **Çok çekirdekli encode açıldı** (yukarıda) ve karşılığında **varsayılan artık tam
-  çözünürlük**: küçültme yalnızca 2560 pikselden geniş ekranlarda (4K) devreye giriyor.
+- **Çok çekirdekli encode açıldı** (yukarıda).
 - **Bit hızı tavanı 3 → 5 Mbit/s**: tam çözünürlükte aynı bit hızını dört kat piksele
   yaymak görüntüyü bloklu yapardı.
+
+### Çözünürlük artık otomatik ayarlanıyor
+
+Ölçüm şunu gösterdi: 4 çekirdekli bir makinede 1080p bir karenin kodlanması **~110 ms**
+sürüyor. Hedef 15 fps'te kare başına bütçe 66 ms — yani tam çözünürlük o makinede
+**yetişmiyor** ve sonuç 7 fps + her karede 100 ms+ gecikme oluyordu. "Tam kalite" ile
+"düşük gecikme" yazılımsal encode'da doğrudan çelişir; sabit bir sayı seçmek yerine
+makinenin gerçekten yetiştiği en büyük boyut ölçülerek bulunuyor:
+
+- Tam çözünürlükte başlanır.
+- Kare maliyeti (dönüşüm + encode) bütçenin %85'ini üst üste aşarsa bir basamak inilir.
+- Maliyet bütçenin yarısının altında 10 sn boyunca kalırsa bir basamak çıkılır.
+- Basamaklar genişliği ~1,25 kat azaltır: 1920 → 1536 → 1228 → 982 → 784 → 640.
+  (Ara boyutlar alan ortalamalı ölçeklemeyle üretilir; yalnızca tam bölenlerle 1080p'den
+  sonraki adım 540p olurdu, aradaki fark çok büyük.)
+
+Değişiklikler konsola yazılır: `çözünürlük 1920x1080 → 1536x864`.
+
+Hızlı makinede tam çözünürlükte kalır; yavaş makinede sürünmek yerine biraz yumuşak ama
+akıcı ve düşük gecikmeli olur. Bu davranışı istemiyorsan `--scale` ile sabitle.
 
 ### Ayarlar
 
 ```powershell
-away-client.exe                 # varsayılan: tam çözünürlük (4K ise yarı)
-away-client.exe --scale 2       # yarı çözünürlük (makine yetişemiyorsa)
-away-client.exe --fps 10        # kare hızını düşür (CPU'yu doğrudan düşürür)
+away-client.exe                 # varsayılan: otomatik çözünürlük (önerilen)
+away-client.exe --scale 1       # tam çözünürlükte SABİTLE (otomatik koruma kapanır)
+away-client.exe --scale 2       # yarı çözünürlükte sabitle
+away-client.exe --fps 10        # kare hızını düşür → kare başına bütçe artar,
+                                #   otomatik mod daha yüksek çözünürlükte kalır
 away-client.exe --bitrate 8000  # daha net görüntü (internet yüklemesi elveriyorsa)
 away-client.exe --bitrate 1500  # yükleme dar / kareler geç geliyorsa
 ```
 
-Otomatik ölçek: 1920 → 1920 (tam), 2560 → 2560 (tam), 3840 → 1920 (yarı).
-**Ağır/gecikmeliyse** sırayla `--scale 2`, sonra `--fps 10`. **Bloklu/bulanıksa ama akıcıysa**
-`--bitrate` artır. Hangisinin gerektiğini aşağıdaki ölçüm söyler.
+**Görüntü yumuşak ama akıcı** → makine tam çözünürlüğe yetişmiyor demektir; `--fps 10`
+denersen otomatik mod daha yüksek çözünürlükte kalabilir. **Akıcı ama bloklu** →
+`--bitrate` artır.
 
 ### Ölçüm (tahmin etme, bak)
 
 - **Ekranı paylaşan makinenin konsolunda** 5 saniyede bir şu satır çıkar:
 
   ```
-  ekran 1920x1080 (1/1) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 4.2 ms | encode 11.3 ms | 3900 kbps
+  ekran 1228x690 | gönderilen 14.8 fps | atlanan 61 | dönüşüm 8.2 ms | encode 41.3 ms | 1900 kbps
   ```
 
   `dönüşüm` + `encode` toplamı **1000/fps ms'yi (15 fps'te 66 ms) aşıyorsa** darboğaz
-  CPU'dur → `--scale 2` ya da `--fps` düşür. Altındaysa gecikme ağdandır → `--bitrate` düşür.
+  CPU'dur — otomatik mod bunu kendisi görüp iner. Altındaysa ve fps yine düşükse gecikme
+  ağdandır → `--bitrate` düşür.
+
+  Not: `dönüşüm` süresi çözünürlük düştükçe pek azalmaz — ekranın TAMAMI her hâlükârda
+  okunuyor. Asıl ölçekle küçülen kalem `encode`.
 
 - **İzleyici tarafında** uzak ekranın üst şeridinde `14 fps · 1920×1080` yazar. Bu sayı
   host'un "gönderilen" fps'inden belirgin düşükse sorun ağ/bant genişliğidir, encode değil.
