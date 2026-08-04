@@ -12,7 +12,15 @@ license.workspace = true
 
 [features]
 default = []
-media = ["dep:scrap", "dep:openh264", "dep:bytes", "dep:eframe", "dep:egui", "dep:enigo"]
+media = [
+    "dep:scrap",
+    "dep:openh264",
+    "dep:openh264-sys2",
+    "dep:bytes",
+    "dep:eframe",
+    "dep:egui",
+    "dep:enigo",
+]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,6 +39,11 @@ webrtc = "0.17.2"
 # --- media feature (opsiyonel, ağır) ---
 scrap = { version = "0.5", optional = true }
 openh264 = { version = "0.6", optional = true }
+# Doğrudan sys bağımlılığı YALNIZCA encoder'ı çok çekirdeğe almak için (bkz. encode.rs):
+# openh264 crate'i dilim modunu dışarı açmıyor, o yüzden parametre yapısına ham API
+# üzerinden dokunuyoruz. `openh264` zaten aynı sürümü çekiyor; cargo feature birleştirmesi
+# sayesinde ikinci bir C derlemesi olmuyor.
+openh264-sys2 = { version = "0.6", default-features = false, optional = true }
 bytes = { version = "1", optional = true }
 eframe = { version = "0.28", optional = true }
 egui = { version = "0.28", optional = true }

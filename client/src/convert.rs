@@ -17,15 +17,18 @@ use openh264::formats::YUVSource;
 
 /// Yakalanan genişliğe göre ölçek bölenini seç.
 ///
-/// Yazılımsal H264 encode'un maliyeti doğrudan piksel sayısıyla orantılı ve openh264
-/// varsayılan ayarlarında TEK ÇEKİRDEK kullanıyor (`SM_SINGLE_SLICE` yüzünden
-/// `iMultipleThreadIdc` 1'e kırpılıyor), yani "daha çok çekirdek al" seçeneği yok.
-/// Geniş ekranlarda tam çözünürlük gerçek zamanlı kodlanamaz.
+/// Yazılımsal H264 encode'un maliyeti doğrudan piksel sayısıyla orantılı. Encoder artık
+/// çok çekirdekli çalıştığı için (bkz. `encode::enable_multicore`) 1080p ve 1440p tam
+/// çözünürlük gerçek zamanlı kodlanabiliyor — eski 1600 px sınırı bu yüzden gereksiz
+/// yere görüntüyü bulanıklaştırıyordu. Sınır artık yalnızca 4K gibi uçlar için var:
+/// 3840 px'te piksel sayısı 1080p'nin dört katı ve hiçbir yazılımsal encoder yetişmez.
+///
+/// 1920 → 1920 (tam), 2560 → 2560 (tam), 3840 → 1920 (yarı).
 ///
 /// Tam sayı bölen kullanılır: n×n kutu ortalaması hem ucuzdur hem de metni keyfi
 /// yeniden örneklemeye göre daha az bozar.
 pub fn auto_scale(width: usize) -> usize {
-    const MAX_WIDTH: usize = 1600;
+    const MAX_WIDTH: usize = 2560;
     let mut n = 1;
     while width / n > MAX_WIDTH {
         n += 1;

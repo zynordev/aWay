@@ -33,19 +33,23 @@ Sinyal sunucusu CANLI: wss://away.bilgicoderteam.tr/ws  (istemcinin varsayılan�
      .\target\release\away-client.exe --user test2 --pass test1234 --connect test
    -> test penceresinde "Kabul et" -> test2 test'in ekranını görür.
 
-4) Yavaş/gecikmeli gelirse (performans):
+4) Kalite / gecikme ayarları:
    Video tamamen yazılımsal kodlanıyor; maliyet piksel sayısı x fps ile orantılı.
-   Varsayılan olarak 1600 pikselden geniş ekranlar otomatik küçültülür.
-     .\away-client.exe --scale 1   # tam çözünürlük (en net, en pahalı)
-     .\away-client.exe --scale 2   # yarı çözünürlük (hala agirsa)
-     .\away-client.exe --fps 10    # kare hizini dusur (CPU'yu dogrudan dusurur)
+   Encode artık ÇOK ÇEKİRDEKLİ ve varsayılan TAM ÇÖZÜNÜRLÜK (yalnızca 4K ekranlar
+   yarıya iner).
+     .\away-client.exe --scale 2       # yarı çözünürlük (makine yetişemiyorsa)
+     .\away-client.exe --fps 10        # kare hizini dusur (CPU'yu dogrudan dusurur)
+     .\away-client.exe --bitrate 8000  # daha net (internet yüklemesi elveriyorsa)
+     .\away-client.exe --bitrate 1500  # yükleme dar / kareler geç geliyorsa
 
    ÖLÇÜM — tahmin etme, iki sayıya bak:
-   - Ekranı PAYLAŞAN makinenin konsolunda 5 sn'de bir şu satır çıkar:
-       ekran 960x540 (1/2) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 3.2 ms |
-       encode 8.1 ms | 1180 kbps
+   - Ekranı PAYLAŞAN makinenin konsolunda açılışta bir kez:
+       encode 8 çekirdekte (çok dilimli)      <- burada 1 yazıyorsa haber ver
+     ve 5 sn'de bir şu satır:
+       ekran 1920x1080 (1/1) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 4.2 ms |
+       encode 11.3 ms | 3900 kbps
      "dönüşüm + encode" toplamı 15 fps'te 66 ms'yi aşıyorsa darboğaz CPU'dur
-     -> --scale / --fps düşür. Aşmıyorsa gecikme ağdandır.
+     -> --scale 2 / --fps düşür. Aşmıyorsa gecikme ağdandır -> --bitrate düşür.
    - İZLEYEN tarafta uzak ekranın üst şeridinde "14 fps · 960x540" yazar. Bu sayı
      host'un "gönderilen" fps'inden belirgin düşükse sorun ağ/bant genişliğidir.
    Sorun devam ederse bu iki satırı Claude'a yapıştır.

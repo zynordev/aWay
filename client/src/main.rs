@@ -57,11 +57,17 @@ struct Args {
     #[arg(long, default_value_t = 15)]
     fps: u32,
     /// (media) Görüntüyü kaç kat küçülterek gönder (1 = tam çözünürlük, 2 = yarı…).
-    /// Verilmezse ekran genişliğine göre otomatik seçilir: 1600 pikselden geniş
-    /// ekranlar küçültülür. CPU ve gecikme doğrudan piksel sayısıyla orantılıdır —
-    /// görüntü bulanık geliyorsa `--scale 1`, hâlâ ağırsa `--scale 2` denenir.
+    /// Verilmezse otomatik: 2560 pikselden geniş ekranlar (4K) yarıya iner, 1080p ve
+    /// 1440p tam çözünürlük gider. CPU ve gecikme doğrudan piksel sayısıyla orantılıdır —
+    /// makine yetişemiyorsa `--scale 2` belirgin rahatlama sağlar.
     #[arg(long)]
     scale: Option<u32>,
+    /// (media) Hedef bit hızı (kbps). Verilmezse çözünürlük ve fps'ten hesaplanır
+    /// (~0,15 bit/piksel/kare, en çok 5000). Görüntü bulanık/bloklu geliyorsa artır;
+    /// internet yüklemesi yetişmiyorsa (kareler geç geliyor) düşür — hattı aşan bit
+    /// hızı kaliteyi artırmaz, sadece kuyruk oluşturup gecikmeye dönüşür.
+    #[arg(long)]
+    bitrate: Option<u32>,
 }
 
 fn main() -> Result<()> {
@@ -114,8 +120,11 @@ fn run_gui(args: Args) -> Result<()> {
     let user = args.user.clone();
     let pass = args.pass.clone();
     let auto_peer = args.connect.clone();
-    let fps = args.fps;
-    let scale = args.scale;
+    let video = capture::VideoOpts {
+        fps: args.fps,
+        scale: args.scale,
+        bitrate_kbps: args.bitrate,
+    };
 
     eframe::run_native(
         "aWay",
@@ -133,7 +142,7 @@ fn run_gui(args: Args) -> Result<()> {
                         return;
                     }
                 };
-                rt.block_on(net::run_engine(shared_e, cmd_rx, frames_e, ctx, fps, scale));
+                rt.block_on(net::run_engine(shared_e, cmd_rx, frames_e, ctx, video));
             });
 
             // Kimlik bilgileri argümanla verildiyse otomatik giriş.

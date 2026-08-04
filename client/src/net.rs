@@ -230,8 +230,7 @@ pub async fn run_engine(
     mut cmd_rx: UnboundedReceiver<UiCommand>,
     frames: FrameBuffer,
     ctx: egui::Context,
-    fps: u32,
-    scale: Option<u32>,
+    video: crate::capture::VideoOpts,
 ) {
     let mut creds: Option<Creds> = None;
     // P2P durum bildirimleri; motorun ömrü boyunca açık kalır.
@@ -278,7 +277,7 @@ pub async fn run_engine(
                         Some(RTCPeerConnectionState::Connected) => {
                             if let Some(s) = session.as_mut() {
                                 if let Some(tx) = s.capture_tx.take() {
-                                    crate::capture::spawn_capture_encoder(tx, fps, scale);
+                                    crate::capture::spawn_capture_encoder(tx, video);
                                 }
                             }
                             set_status(&shared, &ctx, "eş bağlantısı kuruldu");

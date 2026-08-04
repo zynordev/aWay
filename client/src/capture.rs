@@ -10,12 +10,20 @@ use anyhow::{anyhow, Result};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// Görüntü akışı ayarları (komut satırından gelir, oturum boyunca sabittir).
+#[derive(Clone, Copy)]
+pub struct VideoOpts {
+    pub fps: u32,
+    /// Ölçek böleni; `None` ise çözünürlüğe göre otomatik (bkz. `convert::auto_scale`).
+    pub scale: Option<u32>,
+    /// Hedef bit hızı; `None` ise çözünürlük+fps'ten hesaplanır.
+    pub bitrate_kbps: Option<u32>,
+}
+
 /// Ayrı thread'de yakalama+encode döngüsü başlatır. Alıcı (`tx`) kapanınca durur.
-///
-/// `scale` verilmezse çözünürlüğe göre otomatik seçilir (bkz. `convert::auto_scale`).
-pub fn spawn_capture_encoder(tx: mpsc::Sender<(Vec<u8>, Duration)>, fps: u32, scale: Option<u32>) {
+pub fn spawn_capture_encoder(tx: mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) {
     std::thread::spawn(move || {
-        if let Err(e) = capture_encode_loop(&tx, fps, scale) {
+        if let Err(e) = capture_encode_loop(&tx, opts) {
             tracing::error!("yakalama/encode durdu: {e}");
         }
     });
@@ -39,13 +47,10 @@ const KEYFRAME_INTERVAL: Duration = Duration::from_secs(10);
 /// host'un konsolunda görünür.
 const STATS_INTERVAL: Duration = Duration::from_secs(5);
 
-fn capture_encode_loop(
-    tx: &mpsc::Sender<(Vec<u8>, Duration)>,
-    fps: u32,
-    scale: Option<u32>,
-) -> Result<()> {
+fn capture_encode_loop(tx: &mpsc::Sender<(Vec<u8>, Duration)>, opts: VideoOpts) -> Result<()> {
     use scrap::{Capturer, Display};
 
+    let VideoOpts { fps, scale, bitrate_kbps } = opts;
     let display = Display::primary().map_err(|e| anyhow!("birincil ekran: {e}"))?;
     let mut capturer = Capturer::new(display).map_err(|e| anyhow!("yakalayıcı: {e}"))?;
     let (sw, sh) = (capturer.width(), capturer.height());
@@ -57,7 +62,7 @@ fn capture_encode_loop(
     }
     tracing::info!("ekran {sw}x{sh} → {ow}x{oh} (ölçek 1/{n}) @ {fps}fps");
 
-    let mut encoder = H264Encoder::new(ow, oh, fps)?;
+    let mut encoder = H264Encoder::new(ow, oh, fps, bitrate_kbps)?;
     let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
     let started = Instant::now();
     // İlk kare zaten IDR olarak üretilir; sayaç oradan işlemeye başlar.

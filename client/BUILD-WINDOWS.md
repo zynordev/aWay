@@ -119,9 +119,20 @@ karşı makineye gider. Nasıl çalıştığı ve sınırları:
 
 Video hattı tamamen **yazılımsal**: yakala → BGRA'dan I420'ye çevir → H264 encode → ağ →
 decode → I420'den RGB'ye çevir → çiz. Donanım encode (NVENC/QuickSync) henüz yok, bu yüzden
-maliyet **doğrudan piksel sayısı × fps** ile orantılıdır. Ayrıca openh264 bu yapılandırmada
-**tek çekirdek** kullanır (tek dilim/slice modu thread sayısını 1'e kilitler), yani 8
-çekirdekli makinede bile encode tek core'da koşar.
+maliyet **doğrudan piksel sayısı × fps** ile orantılıdır.
+
+**Encode artık çok çekirdekli.** openh264 varsayılan yapılandırmada kareyi tek dilim
+(`SM_SINGLE_SLICE`) olarak kodlar ve bu, thread sayısını 1'e kilitler — 8 çekirdekli
+makinede bile encode tek core'da koşuyordu, en büyük tek darboğaz buydu. Rust katmanı dilim
+modunu dışarı açmadığı için encoder'ın parametre yapısı ham API üzerinden okunup geri
+yazılıyor (`client/src/encode.rs`, `enable_multicore`). Bu kütüphanenin desteklediği yol:
+dilim modu değişince openh264 encoder'ı temiz biçimde yeniden kuruyor. Uygulanamazsa
+(tek çekirdekli makine, çok küçük görüntü) sessizce tek çekirdeğe düşer; host konsolunda
+hangisinin geçerli olduğu yazar:
+
+```
+encode 8 çekirdekte (çok dilimli)
+```
 
 ### Ne değişti (bu tur)
 
@@ -137,32 +148,41 @@ maliyet **doğrudan piksel sayısı × fps** ile orantılıdır. Ayrıca openh26
   istiyordu, yani encode eden makineyi boşuna 60 fps çizime zorluyordu).
 - Yan fayda: openh264'ün kendi encoder/decoder çifti arasındaki renk aralığı uyuşmazlığı
   (kısıtlı yaz / tam oku) düzeldi — görüntü artık soluk değil.
+- **Çok çekirdekli encode açıldı** (yukarıda) ve karşılığında **varsayılan artık tam
+  çözünürlük**: küçültme yalnızca 2560 pikselden geniş ekranlarda (4K) devreye giriyor.
+- **Bit hızı tavanı 3 → 5 Mbit/s**: tam çözünürlükte aynı bit hızını dört kat piksele
+  yaymak görüntüyü bloklu yapardı.
 
 ### Ayarlar
 
 ```powershell
-away-client.exe                # otomatik: 1600 pikselden geniş ekranlar küçültülür
-away-client.exe --scale 1      # tam çözünürlük (en net, en pahalı)
-away-client.exe --scale 2      # yarı çözünürlük (hâlâ ağırsa)
-away-client.exe --fps 10       # kare hızını düşür (CPU'yu doğrudan düşürür)
+away-client.exe                 # varsayılan: tam çözünürlük (4K ise yarı)
+away-client.exe --scale 2       # yarı çözünürlük (makine yetişemiyorsa)
+away-client.exe --fps 10        # kare hızını düşür (CPU'yu doğrudan düşürür)
+away-client.exe --bitrate 8000  # daha net görüntü (internet yüklemesi elveriyorsa)
+away-client.exe --bitrate 1500  # yükleme dar / kareler geç geliyorsa
 ```
 
-Otomatik seçim: 1920 geniş ekran → 960×540, 2560 → 1280×720, 3840 → 1280×720.
-**Bulanık geliyorsa** `--scale 1`, **hâlâ ağır/gecikmeliyse** `--scale 2` veya `--fps 10`.
+Otomatik ölçek: 1920 → 1920 (tam), 2560 → 2560 (tam), 3840 → 1920 (yarı).
+**Ağır/gecikmeliyse** sırayla `--scale 2`, sonra `--fps 10`. **Bloklu/bulanıksa ama akıcıysa**
+`--bitrate` artır. Hangisinin gerektiğini aşağıdaki ölçüm söyler.
 
 ### Ölçüm (tahmin etme, bak)
 
 - **Ekranı paylaşan makinenin konsolunda** 5 saniyede bir şu satır çıkar:
 
   ```
-  ekran 960x540 (1/2) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 3.2 ms | encode 8.1 ms | 1180 kbps
+  ekran 1920x1080 (1/1) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 4.2 ms | encode 11.3 ms | 3900 kbps
   ```
 
   `dönüşüm` + `encode` toplamı **1000/fps ms'yi (15 fps'te 66 ms) aşıyorsa** darboğaz
-  CPU'dur → `--scale`/`--fps` düşür. Altındaysa gecikme ağdandır.
+  CPU'dur → `--scale 2` ya da `--fps` düşür. Altındaysa gecikme ağdandır → `--bitrate` düşür.
 
-- **İzleyici tarafında** uzak ekranın üst şeridinde `14 fps · 960×540` yazar. Bu sayı
+- **İzleyici tarafında** uzak ekranın üst şeridinde `14 fps · 1920×1080` yazar. Bu sayı
   host'un "gönderilen" fps'inden belirgin düşükse sorun ağ/bant genişliğidir, encode değil.
+
+- Açılışta bir kez: `encode 8 çekirdekte (çok dilimli)`. Burada `1` yazıyorsa çok çekirdekli
+  encode uygulanamamış demektir; o zaman tam çözünürlük beklenenden ağır olur.
 
 Gecikme şikâyeti gelirse: iki sayıyı da (host konsol satırı + izleyici fps) al, hangisinin
 düştüğüne bak.
