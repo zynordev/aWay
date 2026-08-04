@@ -19,6 +19,8 @@ mod app;
 #[cfg(feature = "media")]
 mod capture;
 #[cfg(feature = "media")]
+mod convert;
+#[cfg(feature = "media")]
 mod decode;
 #[cfg(feature = "media")]
 mod encode;
@@ -54,6 +56,12 @@ struct Args {
     /// ucuz. Güçlü makinede `--fps 30` denenebilir.
     #[arg(long, default_value_t = 15)]
     fps: u32,
+    /// (media) Görüntüyü kaç kat küçülterek gönder (1 = tam çözünürlük, 2 = yarı…).
+    /// Verilmezse ekran genişliğine göre otomatik seçilir: 1600 pikselden geniş
+    /// ekranlar küçültülür. CPU ve gecikme doğrudan piksel sayısıyla orantılıdır —
+    /// görüntü bulanık geliyorsa `--scale 1`, hâlâ ağırsa `--scale 2` denenir.
+    #[arg(long)]
+    scale: Option<u32>,
 }
 
 fn main() -> Result<()> {
@@ -107,6 +115,7 @@ fn run_gui(args: Args) -> Result<()> {
     let pass = args.pass.clone();
     let auto_peer = args.connect.clone();
     let fps = args.fps;
+    let scale = args.scale;
 
     eframe::run_native(
         "aWay",
@@ -124,7 +133,7 @@ fn run_gui(args: Args) -> Result<()> {
                         return;
                     }
                 };
-                rt.block_on(net::run_engine(shared_e, cmd_rx, frames_e, ctx, fps));
+                rt.block_on(net::run_engine(shared_e, cmd_rx, frames_e, ctx, fps, scale));
             });
 
             // Kimlik bilgileri argümanla verildiyse otomatik giriş.

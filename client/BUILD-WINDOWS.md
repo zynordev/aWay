@@ -83,6 +83,7 @@ Hazır hesaplar: `halil / 123`, `erdem / 456`, `test / test1234`, `test2 / test1
 - Renderer varsayılan **glow (OpenGL)**; wgpu ileride (M6) eklenebilir.
 - FPS: `--fps 15` (varsayılan). Yakalama+encode tamamen yazılımsal olduğu için CPU maliyeti
   doğrudan fps ile orantılı; güçlü makinede `--fps 30` denenebilir.
+- Çözünürlük: varsayılan **otomatik küçültme** — bkz. bölüm 6.
 - Encode/track/depacketize/decode hattı openh264 0.6 + webrtc-rs 0.17 API'lerine göre
   yazıldı ve kaynaktan doğrulandı; yine de ilk derlemede küçük bir uyarlama gerekirse
   `encode.rs` / `decode.rs` / `app.rs` / `net.rs` yereldir, hızlı düzeltilir.
@@ -113,4 +114,55 @@ karşı makineye gider. Nasıl çalıştığı ve sınırları:
   imlecinle konumu görürsün, ama karşı taraf fareyi oynatırsa göremezsin). Ctrl+Alt+Del ve
   UAC penceresi gitmez (Windows bunları normal uygulamalara iletmez); host'ta uygulama
   yönetici yetkisiyle çalışmıyorsa yönetici pencerelerine tıklanamaz.
+
+## 6. Performans: gecikme ve CPU (ölçüm + ayarlar)
+
+Video hattı tamamen **yazılımsal**: yakala → BGRA'dan I420'ye çevir → H264 encode → ağ →
+decode → I420'den RGB'ye çevir → çiz. Donanım encode (NVENC/QuickSync) henüz yok, bu yüzden
+maliyet **doğrudan piksel sayısı × fps** ile orantılıdır. Ayrıca openh264 bu yapılandırmada
+**tek çekirdek** kullanır (tek dilim/slice modu thread sayısını 1'e kilitler), yani 8
+çekirdekli makinede bile encode tek core'da koşar.
+
+### Ne değişti (bu tur)
+
+- **Renk dönüşümleri elle yazıldı** (`client/src/convert.rs`). openh264'ün kendi
+  dönüştürücüleri piksel başına kayan noktalı çalışıyor ve 1080p'de her iki tarafta da
+  onlarca ms yiyordu. Yerine tamsayı (fixed-point) BT.601 sürümleri kondu.
+- **Küçültme dönüşüme kaynaştırıldı**: ayrı bir ölçekleme geçişi yok, küçültme okurken
+  yapılıyor.
+- **Değişmeyen kare atlanıyor**: masaüstü hareketsizken encode hiç çalışmıyor (yalnızca
+  keyframe zamanı geldiğinde bir kare gider).
+- **Kuyruk 8 → 1**: 8 karelik kuyruk 15 fps'te yarım saniyelik sabit gecikme demekti.
+- Ekranı paylaşan taraftaki dönen bekleme animasyonu kaldırıldı (her karede yeniden çizim
+  istiyordu, yani encode eden makineyi boşuna 60 fps çizime zorluyordu).
+- Yan fayda: openh264'ün kendi encoder/decoder çifti arasındaki renk aralığı uyuşmazlığı
+  (kısıtlı yaz / tam oku) düzeldi — görüntü artık soluk değil.
+
+### Ayarlar
+
+```powershell
+away-client.exe                # otomatik: 1600 pikselden geniş ekranlar küçültülür
+away-client.exe --scale 1      # tam çözünürlük (en net, en pahalı)
+away-client.exe --scale 2      # yarı çözünürlük (hâlâ ağırsa)
+away-client.exe --fps 10       # kare hızını düşür (CPU'yu doğrudan düşürür)
 ```
+
+Otomatik seçim: 1920 geniş ekran → 960×540, 2560 → 1280×720, 3840 → 1280×720.
+**Bulanık geliyorsa** `--scale 1`, **hâlâ ağır/gecikmeliyse** `--scale 2` veya `--fps 10`.
+
+### Ölçüm (tahmin etme, bak)
+
+- **Ekranı paylaşan makinenin konsolunda** 5 saniyede bir şu satır çıkar:
+
+  ```
+  ekran 960x540 (1/2) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 3.2 ms | encode 8.1 ms | 1180 kbps
+  ```
+
+  `dönüşüm` + `encode` toplamı **1000/fps ms'yi (15 fps'te 66 ms) aşıyorsa** darboğaz
+  CPU'dur → `--scale`/`--fps` düşür. Altındaysa gecikme ağdandır.
+
+- **İzleyici tarafında** uzak ekranın üst şeridinde `14 fps · 960×540` yazar. Bu sayı
+  host'un "gönderilen" fps'inden belirgin düşükse sorun ağ/bant genişliğidir, encode değil.
+
+Gecikme şikâyeti gelirse: iki sayıyı da (host konsol satırı + izleyici fps) al, hangisinin
+düştüğüne bak.

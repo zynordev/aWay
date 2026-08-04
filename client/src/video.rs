@@ -43,11 +43,16 @@ pub async fn add_screen_track(pc: &Arc<RTCPeerConnection>) -> Result<Arc<TrackLo
 }
 
 /// Kodlanmış H264 karelerini track'e yazan async görev.
-pub fn spawn_sample_writer(track: Arc<TrackLocalStaticSample>, mut rx: mpsc::Receiver<Vec<u8>>, fps: u32) {
-    let dur = Duration::from_secs_f64(1.0 / fps as f64);
+///
+/// Süre kanaldan gelir (sabit 1/fps değil): yakalama tarafı değişmeyen kareleri
+/// atladığı için kareler arası gerçek süre değişkendir.
+pub fn spawn_sample_writer(
+    track: Arc<TrackLocalStaticSample>,
+    mut rx: mpsc::Receiver<(Vec<u8>, Duration)>,
+) {
     tokio::spawn(async move {
-        while let Some(data) = rx.recv().await {
-            let sample = Sample { data: Bytes::from(data), duration: dur, ..Default::default() };
+        while let Some((data, duration)) = rx.recv().await {
+            let sample = Sample { data: Bytes::from(data), duration, ..Default::default() };
             if let Err(e) = track.write_sample(&sample).await {
                 tracing::warn!("write_sample: {e}");
                 break;

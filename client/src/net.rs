@@ -112,7 +112,7 @@ struct Session {
     /// HOST: yakalama/encode thread'i bağlantı kurulunca başlatılır; kanalın gönderen
     /// ucu o ana kadar burada bekler. Erken başlatılırsa ilk IDR henüz bağlanmamış
     /// track'e yazılıp kaybolur ve izleyici uzun süre siyah ekran görür.
-    capture_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    capture_tx: Option<tokio::sync::mpsc::Sender<(Vec<u8>, Duration)>>,
     /// VIEWER: giriş olaylarının çıkış ucu. Oturum düşünce bu da düşer; karşı taraftaki
     /// enjektör thread'i kapanır ve basılı kalan tuşlar bırakılır.
     input_tx: Option<UnboundedSender<InputEvent>>,
@@ -231,6 +231,7 @@ pub async fn run_engine(
     frames: FrameBuffer,
     ctx: egui::Context,
     fps: u32,
+    scale: Option<u32>,
 ) {
     let mut creds: Option<Creds> = None;
     // P2P durum bildirimleri; motorun ömrü boyunca açık kalır.
@@ -258,7 +259,7 @@ pub async fn run_engine(
                     match cmd {
                         None => break true,
                         Some(c) => {
-                            handle_command(c, &shared, &ctx, &frames, &out, &pc_tx, &mut session, &mut incoming, fps).await;
+                            handle_command(c, &shared, &ctx, &frames, &out, &pc_tx, &mut session, &mut incoming).await;
                         }
                     }
                 }
@@ -277,7 +278,7 @@ pub async fn run_engine(
                         Some(RTCPeerConnectionState::Connected) => {
                             if let Some(s) = session.as_mut() {
                                 if let Some(tx) = s.capture_tx.take() {
-                                    crate::capture::spawn_capture_encoder(tx, fps);
+                                    crate::capture::spawn_capture_encoder(tx, fps, scale);
                                 }
                             }
                             set_status(&shared, &ctx, "eş bağlantısı kuruldu");
@@ -321,7 +322,6 @@ async fn handle_command(
     pc_tx: &PcStateTx,
     session: &mut Option<Session>,
     incoming: &mut Option<Incoming>,
-    fps: u32,
 ) {
     match cmd {
         UiCommand::Login { .. } | UiCommand::Register { .. } => {} // zaten giriş yapıldı
@@ -339,7 +339,7 @@ async fn handle_command(
         }
         UiCommand::Accept => {
             let Some(inc) = incoming.take() else { return };
-            match start_host(shared, ctx, out, pc_tx, inc, fps).await {
+            match start_host(shared, ctx, out, pc_tx, inc).await {
                 Ok(s) => *session = Some(s),
                 Err(e) => set_screen(shared, ctx, Screen::Message {
                     text: format!("paylaşım başlatılamadı: {e}"), error: true,
@@ -452,7 +452,6 @@ async fn start_host(
     out: &UnboundedSender<ClientMessage>,
     pc_tx: &PcStateTx,
     inc: Incoming,
-    fps: u32,
 ) -> anyhow::Result<Session> {
     let pc = new_peer_connection(
         to_rtc_ice_servers(&inc.ice),
@@ -465,8 +464,11 @@ async fn start_host(
 
     // Ekran track'i offer'dan ÖNCE eklenmeli ki SDP'de video yer alsın.
     let track = video::add_screen_track(&pc).await?;
-    let (enc_tx, enc_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-    video::spawn_sample_writer(track, enc_rx, fps);
+    // Kapasite 1: kodlanmış kareler burada BİRİKMEMELİ. Yazıcı geride kalırsa
+    // kuyruk doğrudan gecikmeye dönüşür (8'lik kuyruk 15 fps'te yarım saniye
+    // demekti). Tek yuvayla yakalama döngüsü kendiliğinden yavaşlar, gecikme büyümez.
+    let (enc_tx, enc_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Duration)>(1);
+    video::spawn_sample_writer(track, enc_rx);
     // Yakalama BAŞLATILMAZ — bağlantı `Connected` olunca run_engine başlatır.
 
     // Giriş kanalı da offer'dan ÖNCE açılmalı (SDP'ye application m-line'ı girsin).

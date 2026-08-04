@@ -1,35 +1,33 @@
-//! Ham (sıkıştırılmamış) kare tipleri ve UI'a köprü tampon — `media` feature.
+//! Çözülmüş kare tipi ve UI'a köprü tampon — `media` feature.
 //!
-//! `BgraFrame`: ekran yakalamanın çıktısı (BGRA8888, satır adımı = width*4, dolgusuz).
-//! `RgbaFrame`: decoder çıktısı / izleyici penceresine giren (RGBA8888).
-//! `FrameBuffer`: decode görevinden UI'a en güncel kareyi taşıyan paylaşılan tampon.
+//! `ScreenFrame`: decoder çıktısı, doğrudan çizime hazır. Piksel tipi bilerek
+//! `egui::Color32`: `ColorImage` zaten bunu istiyor, dolayısıyla decoder'ın ürettiği
+//! tampon UI'a ek bir dönüşüm/kopya olmadan taşınabiliyor.
+//!
+//! `FrameBuffer`: decode görevinden UI'a EN GÜNCEL kareyi taşıyan paylaşılan tampon.
+//! Yalnızca son kare saklanır — UI geride kalırsa eski kareler birikip gecikmeye
+//! dönüşmez, sessizce düşer.
 
+use egui::Color32;
 use std::sync::{Arc, Mutex};
 
-/// Yakalanan ham ekran karesi (BGRA, sıkı paketli).
-pub struct BgraFrame {
+/// Çözülmüş, çizime hazır kare.
+pub struct ScreenFrame {
     pub width: usize,
     pub height: usize,
-    pub data: Vec<u8>,
+    pub pixels: Vec<Color32>,
 }
 
-/// Çözülmüş, çizime hazır kare (RGBA, sıkı paketli).
-pub struct RgbaFrame {
-    pub width: usize,
-    pub height: usize,
-    pub data: Vec<u8>,
-}
-
-/// En güncel çözülmüş kareyi tutan paylaşılan tampon (yalnızca son kare saklanır).
+/// En güncel çözülmüş kareyi tutan paylaşılan tampon.
 /// Decode görevi `set` eder, UI her yeniden çizimde `take` eder.
 #[derive(Clone, Default)]
-pub struct FrameBuffer(Arc<Mutex<Option<RgbaFrame>>>);
+pub struct FrameBuffer(Arc<Mutex<Option<ScreenFrame>>>);
 
 impl FrameBuffer {
-    pub fn set(&self, frame: RgbaFrame) {
+    pub fn set(&self, frame: ScreenFrame) {
         *self.0.lock().unwrap() = Some(frame);
     }
-    pub fn take(&self) -> Option<RgbaFrame> {
+    pub fn take(&self) -> Option<ScreenFrame> {
         self.0.lock().unwrap().take()
     }
 }

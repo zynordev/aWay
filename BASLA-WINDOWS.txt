@@ -33,5 +33,22 @@ Sinyal sunucusu CANLI: wss://away.bilgicoderteam.tr/ws  (istemcinin varsayılan�
      .\target\release\away-client.exe --user test2 --pass test1234 --connect test
    -> test penceresinde "Kabul et" -> test2 test'in ekranını görür.
 
+4) Yavaş/gecikmeli gelirse (performans):
+   Video tamamen yazılımsal kodlanıyor; maliyet piksel sayısı x fps ile orantılı.
+   Varsayılan olarak 1600 pikselden geniş ekranlar otomatik küçültülür.
+     .\away-client.exe --scale 1   # tam çözünürlük (en net, en pahalı)
+     .\away-client.exe --scale 2   # yarı çözünürlük (hala agirsa)
+     .\away-client.exe --fps 10    # kare hizini dusur (CPU'yu dogrudan dusurur)
+
+   ÖLÇÜM — tahmin etme, iki sayıya bak:
+   - Ekranı PAYLAŞAN makinenin konsolunda 5 sn'de bir şu satır çıkar:
+       ekran 960x540 (1/2) | gönderilen 14.8 fps | atlanan 61 | dönüşüm 3.2 ms |
+       encode 8.1 ms | 1180 kbps
+     "dönüşüm + encode" toplamı 15 fps'te 66 ms'yi aşıyorsa darboğaz CPU'dur
+     -> --scale / --fps düşür. Aşmıyorsa gecikme ağdandır.
+   - İZLEYEN tarafta uzak ekranın üst şeridinde "14 fps · 960x540" yazar. Bu sayı
+     host'un "gönderilen" fps'inden belirgin düşükse sorun ağ/bant genişliğidir.
+   Sorun devam ederse bu iki satırı Claude'a yapıştır.
+
 Not: --features media OLMADAN derlersen GUI değil, geliştirici data-channel testi çalışır.
 Sorun/çıktı olursa Claude'a yapıştır; app/net/encode/decode.rs yerel, hızlı düzeltilir.

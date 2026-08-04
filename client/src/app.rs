@@ -7,6 +7,7 @@ use crate::frame::FrameBuffer;
 use crate::input::{InputEvent, KeyCode, MouseButton};
 use crate::net::{Screen, Shared, UiCommand};
 use eframe::egui;
+use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct AwayApp {
@@ -35,6 +36,15 @@ pub struct AwayApp {
     scroll: egui::Vec2,
     /// En son gönderilen normalize imleç konumu (aynı noktayı tekrar göndermemek için).
     last_pos: Option<(f32, f32)>,
+
+    // --- ölçüm (izleyici) ---
+    /// Saniyede gelen kare ve son karenin çözünürlüğü; araç çubuğunda gösterilir.
+    /// Gecikme şikâyetlerinde "ne kadarı ağdan, ne kadarı kodlamadan" sorusunu
+    /// tahminle değil bu sayıyla ayırt ediyoruz.
+    rx_fps: f32,
+    rx_count: u32,
+    rx_since: Instant,
+    rx_dims: Option<(usize, usize)>,
 }
 
 impl AwayApp {
@@ -64,6 +74,10 @@ impl AwayApp {
             mods: egui::Modifiers::default(),
             scroll: egui::Vec2::ZERO,
             last_pos: None,
+            rx_fps: 0.0,
+            rx_count: 0,
+            rx_since: Instant::now(),
+            rx_dims: None,
         }
     }
 
@@ -305,9 +319,10 @@ impl AwayApp {
 
     fn ui_sharing(&mut self, ui: &mut egui::Ui, peer: &str) {
         ui.vertical_centered(|ui| {
+            // Burada bilerek Spinner yok: `Spinner` her karede `request_repaint()` çağırır,
+            // yani ekranı paylaşan (ve zaten encode eden) makineyi boş yere 60 fps çizime
+            // zorlar. Paylaşım ekranı hareketsiz olduğunda egui hiç yeniden çizmez.
             ui.add_space(60.0);
-            ui.add(egui::Spinner::new().size(24.0));
-            ui.add_space(12.0);
             ui.heading("Ekranın paylaşılıyor");
             ui.label(format!("{peer} ekranını izliyor."));
             ui.add_space(16.0);
@@ -330,14 +345,23 @@ impl AwayApp {
     }
 
     fn ui_remote(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, peer: &str) {
-        // Yeni kare varsa texture'a yükle.
+        // Yeni kare varsa texture'a yükle. Decode zaten `Color32` üretiyor, yani buradaki
+        // `ColorImage` sadece bir `Vec` taşıması — ara RGBA tamponu ve ek kopya yok.
         if let Some(frame) = self.frames.take() {
+            self.rx_count += 1;
+            self.rx_dims = Some((frame.width, frame.height));
             let image =
-                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.data);
+                egui::ColorImage { size: [frame.width, frame.height], pixels: frame.pixels };
             match &mut self.texture {
                 Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
                 None => self.texture = Some(ctx.load_texture("uzak-ekran", image, egui::TextureOptions::LINEAR)),
             }
+        }
+        let el = self.rx_since.elapsed().as_secs_f32();
+        if el >= 1.0 {
+            self.rx_fps = self.rx_count as f32 / el;
+            self.rx_count = 0;
+            self.rx_since = Instant::now();
         }
 
         // Üst ince şerit: kontrol anahtarı + bağlantıyı kes.
@@ -351,6 +375,19 @@ impl AwayApp {
                 ui.separator();
                 ui.checkbox(&mut control, "Kontrol")
                     .on_hover_text("Fare ve klavyen uzak makineye gönderilsin");
+                ui.separator();
+                // Gecikme şikâyetinde ilk bakılacak sayı: kare gerçekten geliyor mu, kaç
+                // fps ve hangi çözünürlükte. Host tarafındaki istatistik satırıyla
+                // karşılaştırılınca darboğazın ağ mı encode mu olduğu ayırt edilir.
+                let dims = match self.rx_dims {
+                    Some((w, h)) => format!("{w}×{h}"),
+                    None => "—".into(),
+                };
+                ui.label(egui::RichText::new(format!("{:.0} fps · {dims}", self.rx_fps)).weak())
+                    .on_hover_text(
+                        "İzleyiciye saniyede ulaşan kare sayısı ve gelen görüntünün \
+                         çözünürlüğü. Düşükse host'un konsolundaki istatistik satırına bak.",
+                    );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Bağlantıyı kes").clicked() {
                         hangup = true;

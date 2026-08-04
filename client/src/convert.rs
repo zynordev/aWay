@@ -1,0 +1,256 @@
+//! Renk dönüşümü ve ölçek düşürme — `media` feature.
+//!
+//! **Neden elle yazıldı:** openh264 kutusundaki dönüştürücüler (`write_yuv_by_pixel`,
+//! `DecodedYUV::write_rgba8`) piksel başına kayan noktalı aritmetik ve sınır denetimli
+//! dilim erişimi yapıyor. 1080p'de tek başlarına kare başına onlarca ms yiyorlar — yani
+//! ekran akışındaki CPU yükünün ve gecikmenin büyük bölümü encode'a BAŞLAMADAN önce
+//! oluşuyordu. Buradaki sürümler tamsayı sabit-nokta aritmetiği kullanır ve satırları
+//! `chunks_exact` ile gezer, böylece sınır denetimleri iç döngüden çıkar.
+//!
+//! **Ayrıca bu iki fonksiyon tutarlı bir çifttir:** encode tarafı BT.601 *sınırlı* aralık
+//! (Y 16..235) üretir, decode tarafı da aynı aralığı geri açar. openh264'ün kendi iki
+//! fonksiyonu bu konuda uyuşmuyordu (sınırlı yazıp tam aralık okuyordu); görüntü bu
+//! yüzden soluk/düşük kontrastlı çıkıyordu, o da düzelmiş oldu.
+
+use egui::Color32;
+use openh264::formats::YUVSource;
+
+/// Yakalanan genişliğe göre ölçek bölenini seç.
+///
+/// Yazılımsal H264 encode'un maliyeti doğrudan piksel sayısıyla orantılı ve openh264
+/// varsayılan ayarlarında TEK ÇEKİRDEK kullanıyor (`SM_SINGLE_SLICE` yüzünden
+/// `iMultipleThreadIdc` 1'e kırpılıyor), yani "daha çok çekirdek al" seçeneği yok.
+/// Geniş ekranlarda tam çözünürlük gerçek zamanlı kodlanamaz.
+///
+/// Tam sayı bölen kullanılır: n×n kutu ortalaması hem ucuzdur hem de metni keyfi
+/// yeniden örneklemeye göre daha az bozar.
+pub fn auto_scale(width: usize) -> usize {
+    const MAX_WIDTH: usize = 1600;
+    let mut n = 1;
+    while width / n > MAX_WIDTH {
+        n += 1;
+    }
+    n
+}
+
+/// I420 (YUV 4:2:0) kare tamponu; doğrudan encoder'a verilir.
+///
+/// Kare başına yeniden ayırmamak için yeniden kullanılır — 1080p'de her kare ~3 MB'lık
+/// bir ayırma demekti.
+pub struct I420 {
+    width: usize,
+    height: usize,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    /// Bir çıktı satırının ortalanmış RGB değerleri (ölçek düşürme ara belleği).
+    row: Vec<[u32; 3]>,
+    /// Kroma için biriktirilen çift satır (4:2:0 iki satırda bir yazılır).
+    crow: Vec<[u32; 3]>,
+}
+
+impl I420 {
+    pub fn new() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            y: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
+            row: Vec::new(),
+            crow: Vec::new(),
+        }
+    }
+
+    /// İki karenin piksel olarak aynı olup olmadığı. Y tek başına yetmez (renk
+    /// değişebilir), üç düzleme de bakılır. `Vec<u8>` karşılaştırması memcmp'e iner.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.y == other.y
+            && self.u == other.u
+            && self.v == other.v
+    }
+
+    fn resize(&mut self, w: usize, h: usize) {
+        if self.width == w && self.height == h {
+            return;
+        }
+        self.width = w;
+        self.height = h;
+        self.y.clear();
+        self.y.resize(w * h, 0);
+        self.u.clear();
+        self.u.resize((w / 2) * (h / 2), 0);
+        self.v.clear();
+        self.v.resize((w / 2) * (h / 2), 0);
+        self.row.clear();
+        self.row.resize(w, [0; 3]);
+        self.crow.clear();
+        self.crow.resize(w / 2, [0; 3]);
+    }
+}
+
+impl YUVSource for I420 {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.width, self.width / 2, self.width / 2)
+    }
+    fn y(&self) -> &[u8] {
+        &self.y
+    }
+    fn u(&self) -> &[u8] {
+        &self.u
+    }
+    fn v(&self) -> &[u8] {
+        &self.v
+    }
+}
+
+/// BGRA ekran karesini I420'ye çevirir; AYNI geçişte `n` katı küçültür.
+///
+/// `stride` satır adımıdır ve dolgulu olabilir (`stride >= src_w * 4`) — scrap
+/// Windows'ta böyle veriyor; bu yüzden önce sıkı bir kopya almaya gerek kalmıyor
+/// (eski kod 1080p'de kare başına 8 MB'ı boşuna kopyalıyordu).
+///
+/// Çıktı boyutları çifte yuvarlanır: H264 4:2:0 tek boyut kabul etmez.
+pub fn bgra_to_i420(src: &[u8], stride: usize, src_w: usize, src_h: usize, n: usize, out: &mut I420) {
+    let n = n.max(1);
+    let w = (src_w / n) & !1;
+    let h = (src_h / n) & !1;
+    if w == 0 || h == 0 {
+        return;
+    }
+    out.resize(w, h);
+
+    // Alanları ayrı ayrı ödünç al: `row`/`crow` ara bellekleri ile `y/u/v` hedefleri
+    // aynı anda değiştirilebilsin.
+    let I420 { y, u, v, row, crow, .. } = out;
+    let uw = w / 2;
+
+    for oy in 0..h {
+        downsample_row(src, stride, oy, n, row);
+
+        let yr = &mut y[oy * w..oy * w + w];
+        for (dst, px) in yr.iter_mut().zip(row.iter()) {
+            *dst = rgb_to_y(px[0], px[1], px[2]);
+        }
+
+        // Kroma örneği 2×2 çıktı pikselini kapsar: çift satırda biriktir, tekte yaz.
+        if oy % 2 == 0 {
+            for (acc, px) in crow.iter_mut().zip(row.chunks_exact(2)) {
+                acc[0] = px[0][0] + px[1][0];
+                acc[1] = px[0][1] + px[1][1];
+                acc[2] = px[0][2] + px[1][2];
+            }
+        } else {
+            let ci = (oy / 2) * uw;
+            let ur = &mut u[ci..ci + uw];
+            let vr = &mut v[ci..ci + uw];
+            for (((uo, vo), acc), px) in
+                ur.iter_mut().zip(vr.iter_mut()).zip(crow.iter()).zip(row.chunks_exact(2))
+            {
+                let r = (acc[0] + px[0][0] + px[1][0]) / 4;
+                let g = (acc[1] + px[0][1] + px[1][1]) / 4;
+                let b = (acc[2] + px[0][2] + px[1][2]) / 4;
+                *uo = rgb_to_u(r, g, b);
+                *vo = rgb_to_v(r, g, b);
+            }
+        }
+    }
+}
+
+/// `oy` numaralı ÇIKTI satırını üret: kaynaktaki n×n bloklarının RGB ortalaması.
+fn downsample_row(src: &[u8], stride: usize, oy: usize, n: usize, out: &mut [[u32; 3]]) {
+    let w = out.len();
+    if n == 1 {
+        // Yaygın durum (küçük ekranlar): ölçekleme yok, yalnızca BGRA -> RGB.
+        let row = &src[oy * stride..][..w * 4];
+        for (dst, px) in out.iter_mut().zip(row.chunks_exact(4)) {
+            *dst = [u32::from(px[2]), u32::from(px[1]), u32::from(px[0])];
+        }
+        return;
+    }
+    for dst in out.iter_mut() {
+        *dst = [0; 3];
+    }
+    for sy in oy * n..oy * n + n {
+        let row = &src[sy * stride..][..w * n * 4];
+        for (dst, block) in out.iter_mut().zip(row.chunks_exact(n * 4)) {
+            for px in block.chunks_exact(4) {
+                dst[0] += u32::from(px[2]);
+                dst[1] += u32::from(px[1]);
+                dst[2] += u32::from(px[0]);
+            }
+        }
+    }
+    let d = (n * n) as u32;
+    for dst in out.iter_mut() {
+        dst[0] /= d;
+        dst[1] /= d;
+        dst[2] /= d;
+    }
+}
+
+// BT.601, sınırlı aralık (studio swing) — H264'ün varsayılan olarak beklediği aralık.
+// Katsayılar 8 bit sabit noktaya ölçeklenmiştir, taşma olmaz: Y 16..235, U/V 16..240.
+
+#[inline]
+fn rgb_to_y(r: u32, g: u32, b: u32) -> u8 {
+    (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8
+}
+
+#[inline]
+fn rgb_to_u(r: u32, g: u32, b: u32) -> u8 {
+    let (r, g, b) = (r as i32, g as i32, b as i32);
+    (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8
+}
+
+#[inline]
+fn rgb_to_v(r: u32, g: u32, b: u32) -> u8 {
+    let (r, g, b) = (r as i32, g as i32, b as i32);
+    (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8
+}
+
+/// Çözülmüş I420 kareyi doğrudan egui piksellerine açar.
+///
+/// Ara bir RGBA `Vec<u8>` üretilmez: hedef zaten `ColorImage`'ın istediği
+/// `Vec<Color32>`. Böylece izleyicide kare başına fazladan bir tam ekran ayırma +
+/// tam ekran kopya ortadan kalkar (1080p'de 8 MB'ın iki katı trafik demekti).
+///
+/// `w` çift olmalıdır (H264 4:2:0 zaten çift üretir); çağıran yuvarlar.
+pub fn i420_to_pixels(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    strides: (usize, usize, usize),
+    w: usize,
+    h: usize,
+    out: &mut Vec<Color32>,
+) {
+    out.clear();
+    out.reserve(w * h);
+    for r in 0..h {
+        let yr = &y[r * strides.0..][..w];
+        let cr = r / 2;
+        let ur = &u[cr * strides.1..][..w / 2];
+        let vr = &v[cr * strides.2..][..w / 2];
+        // Bir kroma örneği yatayda iki luma pikselini besler.
+        for ((pair, &uu), &vv) in yr.chunks_exact(2).zip(ur).zip(vr) {
+            let d = i32::from(uu) - 128;
+            let e = i32::from(vv) - 128;
+            let (dr, dg, db) = (409 * e + 128, -100 * d - 208 * e + 128, 516 * d + 128);
+            for &yy in pair {
+                let c = 298 * (i32::from(yy) - 16);
+                out.push(Color32::from_rgb(clamp8(c + dr), clamp8(c + dg), clamp8(c + db)));
+            }
+        }
+    }
+}
+
+#[inline]
+fn clamp8(v: i32) -> u8 {
+    (v >> 8).clamp(0, 255) as u8
+}
